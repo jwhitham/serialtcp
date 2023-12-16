@@ -137,6 +137,8 @@ class SerialToNet:
 
 def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
                     name: str, debug: bool, is_client: bool, timeout: float) -> bool:
+    """The client and server will use this to synchronise over the serial line,
+    ensuring that both are present and in the same state."""
 
     # The message sequence for synchronisation
     to_send = [ST_SERVER_HELLO_1, ST_SERVER_HELLO_2]
@@ -192,6 +194,73 @@ def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
                 sys.stderr.write('{}: send sync: {}\n'.format(name, repr(to_send[i])))
             ser.write(ST_ESCAPE + to_send[i])
 
+
+    return True
+
+def do_server_accept_connection(ser_to_net: SerialToNet, name: str,
+                        server_socket: socket.socket) -> typing.Optional[socket.socket]:
+    """The server will use this to accept a connection.
+
+    If an ST_DISCONNECT message is received via the serial line, then
+    the connection acceptance is aborted. This happens when the
+    client side is stopped and restarted."""
+
+    # Await connection
+    while True:
+        try:
+            (client_socket, addr) = server_socket.accept()
+            (client_host, client_port) = addr
+            sys.stderr.write('{}: connection from {}:{}\n'.format(name, client_host, client_port))
+            return client_socket
+        except TimeoutError:
+            # Check for disconnection command from the other side
+            code = ser_to_net.get_control_message()
+            while (code is not None) and (code != ST_DISCONNECT):
+                code = ser_to_net.get_control_message()
+
+            if code == ST_DISCONNECT:
+                sys.stderr.write('{}: ERROR: Connection aborted by the client side\n'.format(name))
+                return None
+
+def do_server_configure_socket(client_socket: socket.socket, timeout: float) -> None:
+    # More quickly detect bad clients who quit without closing the
+    # connection: After 1 second of idle, start sending TCP keep-alive
+    # packets every 1 second. If 3 consecutive keep-alive packets
+    # fail, assume the client is gone and close the connection.
+    try:
+        client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
+        client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
+        client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+        client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except AttributeError:
+        pass # XXX not available on windows
+    client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    client_socket.settimeout(timeout)
+
+def do_server_await_client_connect(ser_to_net: SerialToNet, name: str,
+            client_socket: socket.socket, timeout: float) -> bool:
+
+    # Await message indicating connection or failure
+    timeout_at = time.monotonic() + timeout
+    code = None
+    while ((code != ST_CONNECTED)
+    and (code != ST_CONNECTION_FAILED)
+    and (code != ST_DISCONNECT)
+    and (time.monotonic() <= timeout_at)):
+        code = ser_to_net.get_control_message(max(0.0, timeout_at - time.monotonic()))
+
+    if code == ST_CONNECTION_FAILED:
+        sys.stderr.write('{}: ERROR: Connection failed on the client side\n'.format(name))
+        client_socket.close()
+        return False
+    if code == ST_DISCONNECT:
+        sys.stderr.write('{}: ERROR: Connection aborted by the client side\n'.format(name))
+        client_socket.close()
+        return False
+    if code != ST_CONNECTED:
+        sys.stderr.write('{}: ERROR: Connection timeout on the client side\n'.format(name))
+        client_socket.close()
+        return False
 
     return True
 
@@ -362,63 +431,21 @@ it waits for the next connect.
                 sys.stderr.write('{}: serial link ok, waiting for connection on {}:{}...\n'.format(
                         name, server_bind_address, server_port))
 
-                # Await connection
-                code = None
-                while code != ST_DISCONNECT:
-                    try:
-                        (client_socket, addr) = server_socket.accept()
-                        (client_host, client_port) = addr
-                        break
-                    except TimeoutError:
-                        # Check for disconnection command from the other side
-                        code = ser_to_net.get_control_message()
-                        while (code is not None) and (code != ST_DISCONNECT):
-                            code = ser_to_net.get_control_message()
-
-                if code == ST_DISCONNECT:
-                    sys.stderr.write('{}: ERROR: Connection aborted by the client side\n'.format(name))
+                client_socket = do_server_accept_connection(
+                            ser_to_net=ser_to_net, server_socket=server_socket, name=name)
+                if client_socket is None:
+                    # Go back to synchronising
                     continue
 
-                sys.stderr.write('{}: connection from {}:{}\n'.format(name, client_host, client_port))
-                # More quickly detect bad clients who quit without closing the
-                # connection: After 1 second of idle, start sending TCP keep-alive
-                # packets every 1 second. If 3 consecutive keep-alive packets
-                # fail, assume the client is gone and close the connection.
-                try:
-                    client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
-                    client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
-                    client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
-                    client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                except AttributeError:
-                    pass # XXX not available on windows
-                client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                client_socket.settimeout(args.timeout)
-
+                do_server_configure_socket(client_socket=client_socket, timeout=args.timeout)
                 ser_to_net.set_socket(client_socket)
 
                 # Tell the other side of the serial cable to connect
                 ser.write(ST_ESCAPE + ST_CONNECT)
 
-                # Await message indicating connection or failure
-                timeout_at = time.monotonic() + args.timeout
-                code = None
-                while ((code != ST_CONNECTED)
-                and (code != ST_CONNECTION_FAILED)
-                and (code != ST_DISCONNECT)
-                and (time.monotonic() <= timeout_at)):
-                    code = ser_to_net.get_control_message(max(0.0, timeout_at - time.monotonic()))
-
-                if code == ST_CONNECTION_FAILED:
-                    sys.stderr.write('{}: ERROR: Connection failed on the client side\n'.format(name))
-                    client_socket.close()
-                    continue
-                if code == ST_DISCONNECT:
-                    sys.stderr.write('{}: ERROR: Connection aborted by the client side\n'.format(name))
-                    client_socket.close()
-                    continue
-                if code != ST_CONNECTED:
-                    sys.stderr.write('{}: ERROR: Connection timeout on the client side\n'.format(name))
-                    client_socket.close()
+                if not do_server_await_client_connect(ser_to_net=ser_to_net, name=name,
+                                client_socket=client_socket, timeout=args.timeout):
+                    # Go back to synchronising
                     continue
 
             else:
