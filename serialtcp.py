@@ -223,6 +223,8 @@ def do_server_accept_connection(ser_to_net: SerialToNet, name: str,
                 return None
 
 def do_server_configure_socket(client_socket: socket.socket, timeout: float) -> None:
+    """Configure the TCP socket on the server side."""
+
     # More quickly detect bad clients who quit without closing the
     # connection: After 1 second of idle, start sending TCP keep-alive
     # packets every 1 second. If 3 consecutive keep-alive packets
@@ -239,8 +241,8 @@ def do_server_configure_socket(client_socket: socket.socket, timeout: float) -> 
 
 def do_server_await_client_connect(ser_to_net: SerialToNet, name: str,
             client_socket: socket.socket, timeout: float) -> bool:
+    """Wait for the client to connect to the TCP port."""
 
-    # Await message indicating connection or failure
     timeout_at = time.monotonic() + timeout
     code = None
     while ((code != ST_CONNECTED)
@@ -263,6 +265,32 @@ def do_server_await_client_connect(ser_to_net: SerialToNet, name: str,
         return False
 
     return True
+
+def do_client_await_serial_connect(ser_to_net: SerialToNet, name: str) -> bool:
+    """On the client side, await a connection message via the serial link."""
+    code = None
+    while (code != ST_CONNECT) and (code != ST_DISCONNECT):
+        code = ser_to_net.get_control_message(1000.0)
+
+    if code == ST_DISCONNECT:
+        sys.stderr.write('{}: ERROR: Connection aborted by the server side\n'.format(name))
+        return False
+
+    return True
+
+def do_client_connect(client_host: str, client_port: int, timeout: float, name: str) -> typing.Optional[socket.socket]:
+    """Connect to a TCP port."""
+    client_socket = socket.socket()
+    client_socket.settimeout(timeout)
+    try:
+        client_socket.connect((client_host, int(client_port)))
+    except socket.error as msg:
+        sys.stderr.write('{}: ERROR: Connection failed: {}\n'.format(name, msg))
+        return None
+
+    sys.stderr.write('{}: connected\n'.format(name))
+    client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    return client_socket
 
 
 
@@ -443,6 +471,7 @@ it waits for the next connect.
                 # Tell the other side of the serial cable to connect
                 ser.write(ST_ESCAPE + ST_CONNECT)
 
+                # Wait for the client to connect to the TCP port
                 if not do_server_await_client_connect(ser_to_net=ser_to_net, name=name,
                                 client_socket=client_socket, timeout=args.timeout):
                     # Go back to synchronising
@@ -452,29 +481,22 @@ it waits for the next connect.
                 sys.stderr.write('{}: serial link ok, waiting for connection on {}...\n'.format(name, args.serialport))
 
                 # Await connect message from the other side of the serial cable
-                code = None
-                while (code != ST_CONNECT) and (code != ST_DISCONNECT):
-                    code = ser_to_net.get_control_message(1000.0)
-
-                if code == ST_DISCONNECT:
-                    sys.stderr.write('{}: ERROR: Connection aborted by the server side\n'.format(name))
+                if not do_client_await_serial_connect(ser_to_net=ser_to_net, name=name):
+                    # Go back to synchronising
                     continue
 
                 sys.stderr.write("{}: connecting to {}:{}...\n".format(name, client_host, client_port))
-                client_socket = socket.socket()
-                client_socket.settimeout(args.timeout)
-                try:
-                    client_socket.connect((client_host, int(client_port)))
-                except socket.error as msg:
-                    sys.stderr.write('{}: ERROR: Connection failed: {}\n'.format(name, msg))
+                client_socket = do_client_connect(client_host=client_host, name=name,
+                        client_port=int(client_port), timeout=args.timeout)
+                if client_socket is None:
                     # Tell the other side that the connection failed
                     ser.write(ST_ESCAPE + ST_CONNECTION_FAILED)
+                    # Go back to synchronising
                     continue
-                sys.stderr.write('{}: connected\n'.format(name))
-                client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
                 ser_to_net.set_socket(client_socket)
 
+                # Tell the other side of the serial cable that the connection is done
                 ser.write(ST_ESCAPE + ST_CONNECTED)
 
             # Start code indicates that the next bytes should be relayed
