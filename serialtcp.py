@@ -407,9 +407,11 @@ def main() -> None:
 This program redirects a TCP connection via a serial port.
 
 The program should run on both sides of a serial connection:
-* On one side, it acts as a TCP server, and any connection to its TCP port
+
+- On one side, it acts as a TCP server, and any connection to its TCP port
   will be forwarded across the serial cable.
-* On the other side, it acts as a TCP client, and any connection via the
+
+- On the other side, it acts as a TCP client, and any connection via the
   serial cable will be forwarded to a specified IP address and port number.
 """,
         epilog="""\
