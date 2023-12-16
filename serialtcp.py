@@ -33,6 +33,8 @@ ST_CLIENT_HELLO_1 = b"\xc1"
 ST_CLIENT_HELLO_2 = b"\xc2"
 ST_NUL = b"\x00" # sent first to be sure we are not in the escape state
 
+RETRY_TIMEOUT = 1.0
+
 class SerialToNet:
     """Received serial data is separated into control messages and TCP data."""
 
@@ -280,6 +282,7 @@ def do_client_await_serial_connect(ser_to_net: SerialToNet, name: str) -> bool:
 
 def do_client_connect(client_host: str, client_port: int, timeout: float, name: str) -> typing.Optional[socket.socket]:
     """Connect to a TCP port."""
+    sys.stderr.write("{}: connecting to {}:{}...\n".format(name, client_host, client_port))
     client_socket = socket.socket()
     client_socket.settimeout(timeout)
     try:
@@ -292,6 +295,34 @@ def do_client_connect(client_host: str, client_port: int, timeout: float, name: 
     client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     return client_socket
 
+def do_network_to_serial_loop(ser_to_net: SerialToNet, ser: serial.Serial,
+                client_socket: socket.socket) -> bool:
+    if ser_to_net.get_control_message() == ST_DISCONNECT:
+        return False # Disconnected
+
+    try:
+        data = client_socket.recv(4096)
+    except TimeoutError:
+        return True
+
+    if data == b"":
+        return False # Disconnected
+
+    i = 0
+    while i < len(data):
+        if data[i:i+1] == ST_ESCAPE:
+            # Escaping required for this character
+            data = data[:i] + ST_ESCAPE + data[i:]
+            i += 2
+        else:
+            # Literal character
+            i += 1
+
+    c = ser.write(data)
+    if c != len(data):
+        raise Exception(f"Unable to send {len(data)} bytes: sent {c}")
+
+    return True
 
 
 def main() -> None:
@@ -434,7 +465,7 @@ it waits for the next connect.
             server_port = args.server
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_socket.settimeout(args.timeout)
+        server_socket.settimeout(RETRY_TIMEOUT)
         server_socket.bind((server_bind_address, int(server_port)))
         server_socket.listen(0)
         sys.stderr.write(f'{name}: serialtcp.py TCP service listening on {server_bind_address}:{server_port}\n')
@@ -445,8 +476,6 @@ it waits for the next connect.
     sys.stderr.write('{}: waiting for serial link on {}...\n'.format(name, args.serialport))
 
     try:
-        code: typing.Optional[ControlCommand] = None
-        intentional_exit = False
         while True:
             # The two sides of the serial connection should synchronise
             sync_timeout = 0.1
@@ -465,7 +494,7 @@ it waits for the next connect.
                     # Go back to synchronising
                     continue
 
-                do_server_configure_socket(client_socket=client_socket, timeout=args.timeout)
+                do_server_configure_socket(client_socket=client_socket, timeout=RETRY_TIMEOUT)
                 ser_to_net.set_socket(client_socket)
 
                 # Tell the other side of the serial cable to connect
@@ -485,7 +514,6 @@ it waits for the next connect.
                     # Go back to synchronising
                     continue
 
-                sys.stderr.write("{}: connecting to {}:{}...\n".format(name, client_host, client_port))
                 client_socket = do_client_connect(client_host=client_host, name=name,
                         client_port=int(client_port), timeout=args.timeout)
                 if client_socket is None:
@@ -504,35 +532,12 @@ it waits for the next connect.
 
             try:
                 # enter network <-> serial loop
-                client_socket.settimeout(0.1)
-                while True:
-                    if ser_to_net.get_control_message() == ST_DISCONNECT:
-                        break # Disconnected
-
-                    try:
-                        data = client_socket.recv(4096)
-                    except TimeoutError:
-                        continue
-
-                    if data == b"":
-                        break # Disconnected
-
-                    i = 0
-                    while i < len(data):
-                        if data[i:i+1] == ST_ESCAPE:
-                            # Escaping required for this character
-                            data = data[:i] + ST_ESCAPE + data[i:]
-                            i += 2
-                        else:
-                            # Literal character
-                            i += 1
-
-                    c = ser.write(data)
-                    if c != len(data):
-                        raise Exception(f"Unable to send {len(data)} bytes: sent {c}")
+                client_socket.settimeout(RETRY_TIMEOUT)
+                while do_network_to_serial_loop(ser_to_net=ser_to_net,
+                            ser=ser, client_socket=client_socket):
+                    pass
 
             except KeyboardInterrupt:
-                intentional_exit = True
                 raise
             except socket.error as msg:
                 sys.stderr.write('{}: ERROR: {}\n'.format(name, msg))
