@@ -33,8 +33,8 @@ ST_CLIENT_HELLO_1 = b"\xc1"
 ST_CLIENT_HELLO_2 = b"\xc2"
 ST_NUL = b"\x00" # sent first to be sure we are not in the escape state
 
-class SerialToNet(serial.threaded.Protocol):
-    """serial->socket"""
+class SerialToNet:
+    """Received serial data is separated into control messages and TCP data."""
 
     def __init__(self, name: str, debug: bool) -> None:
         self.__name = name
@@ -44,9 +44,10 @@ class SerialToNet(serial.threaded.Protocol):
         self.__started = False
         self.__control_message_queue: typing.Deque[ControlCommand] = collections.deque()
         self.__message_lock = threading.Condition()
+        self.__protocol = self.__SerialToNetProtocol(self)
 
-    def __call__(self) -> serial.threaded.Protocol:
-        return self
+    def get_protocol(self) -> serial.threaded.Protocol:
+        return self.__protocol
 
     def get_control_message(self, timeout=0.0) -> typing.Optional[ControlCommand]:
         with self.__message_lock:
@@ -122,7 +123,19 @@ class SerialToNet(serial.threaded.Protocol):
             # In the event of an unexpected disconnection, try to stop
             self.disconnect()
 
-def synchronised(ser: serial.Serial, ser_to_net: SerialToNet,
+    class __SerialToNetProtocol(serial.threaded.Protocol):
+        """Wrapper for serial.threaded.Protocol created to allow full type-checking on SerialToNet."""
+        def __init__(self, parent: "SerialToNet") -> None:
+            self.__parent = parent
+
+        def __call__(self) -> serial.threaded.Protocol:
+            return self
+
+        def data_received(self, data: bytes) -> None:
+            self.__parent.data_received(data)
+
+
+def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
                     name: str, debug: bool, is_client: bool, timeout: float) -> bool:
 
     # The message sequence for synchronisation
@@ -314,7 +327,7 @@ it waits for the next connect.
         sys.exit(1)
 
     ser_to_net = SerialToNet(name, args.debug)
-    serial_worker = serial.threaded.ReaderThread(ser, ser_to_net)
+    serial_worker = serial.threaded.ReaderThread(ser, ser_to_net.get_protocol())
     serial_worker.start()
 
     if args.server:
@@ -340,7 +353,7 @@ it waits for the next connect.
         while True:
             # The two sides of the serial connection should synchronise
             sync_timeout = 0.1
-            while not synchronised(ser=ser, ser_to_net=ser_to_net, name=name,
+            while not do_synchronise(ser=ser, ser_to_net=ser_to_net, name=name,
                                 debug=args.debug, is_client=bool(args.client), timeout=sync_timeout):
                 sync_timeout = min(10.0, sync_timeout * 1.5)
 
