@@ -297,6 +297,7 @@ def do_client_connect(client_host: str, client_port: int, timeout: float, name: 
 
 def do_network_to_serial_loop(ser_to_net: SerialToNet, ser: serial.Serial,
                 client_socket: socket.socket) -> bool:
+    """Transfer data from network packets to serial."""
     if ser_to_net.get_control_message() == ST_DISCONNECT:
         return False # Disconnected
 
@@ -324,6 +325,81 @@ def do_network_to_serial_loop(ser_to_net: SerialToNet, ser: serial.Serial,
 
     return True
 
+
+def do_main_loop(ser: serial.Serial, ser_to_net: SerialToNet, name: str,
+            server_socket: typing.Optional[socket.socket], server_bind_address: str, server_port: int,
+            client_host: str, client_port: int,
+            debug: bool, timeout: float, serialport: str) -> None:
+
+    # The two sides of the serial connection should synchronise
+    sync_timeout = 0.1
+    while not do_synchronise(ser=ser, ser_to_net=ser_to_net, name=name,
+                        debug=debug, is_client=server_socket is None, timeout=sync_timeout):
+        sync_timeout = min(10.0, sync_timeout * 1.5)
+
+    # The connection is not yet set up. A connection to the server will begin it.
+    if server_socket is not None:
+        sys.stderr.write('{}: serial link ok, waiting for connection on {}:{}...\n'.format(
+                name, server_bind_address, server_port))
+
+        client_socket = do_server_accept_connection(
+                    ser_to_net=ser_to_net, server_socket=server_socket, name=name)
+        if client_socket is None:
+            # Go back to synchronising
+            return
+
+        do_server_configure_socket(client_socket=client_socket, timeout=RETRY_TIMEOUT)
+        ser_to_net.set_socket(client_socket)
+
+        # Tell the other side of the serial cable to connect
+        ser.write(ST_ESCAPE + ST_CONNECT)
+
+        # Wait for the client to connect to the TCP port
+        if not do_server_await_client_connect(ser_to_net=ser_to_net, name=name,
+                        client_socket=client_socket, timeout=timeout):
+            # Go back to synchronising
+            return
+
+    else:
+        sys.stderr.write('{}: serial link ok, waiting for connection on {}...\n'.format(name, serialport))
+
+        # Await connect message from the other side of the serial cable
+        if not do_client_await_serial_connect(ser_to_net=ser_to_net, name=name):
+            # Go back to synchronising
+            return
+
+        client_socket = do_client_connect(client_host=client_host, name=name,
+                client_port=client_port, timeout=timeout)
+        if client_socket is None:
+            # Tell the other side that the connection failed
+            ser.write(ST_ESCAPE + ST_CONNECTION_FAILED)
+            # Go back to synchronising
+            return
+
+        ser_to_net.set_socket(client_socket)
+
+        # Tell the other side of the serial cable that the connection is done
+        ser.write(ST_ESCAPE + ST_CONNECTED)
+
+    # Start code indicates that the next bytes should be relayed
+    ser.write(ST_ESCAPE + ST_START)
+
+    # enter network <-> serial loop
+    try:
+        client_socket.settimeout(RETRY_TIMEOUT)
+        while do_network_to_serial_loop(ser_to_net=ser_to_net,
+                    ser=ser, client_socket=client_socket):
+            pass
+    except socket.error as msg:
+        sys.stderr.write('{}: ERROR: {}\n'.format(name, msg))
+    except ConnectionResetError:
+        pass
+    finally:
+        ser_to_net.disconnect()
+
+        sys.stderr.write('{}: disconnected\n'.format(name))
+        client_socket.close()
+        ser.write(ST_ESCAPE + ST_DISCONNECT)
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -457,6 +533,9 @@ it waits for the next connect.
     ser_to_net = SerialToNet(name, args.debug)
     serial_worker = serial.threaded.ReaderThread(ser, ser_to_net.get_protocol())
     serial_worker.start()
+    client_host = server_bind_address = ""
+    client_port = server_port = "0"
+    server_socket: typing.Optional[socket.socket] = None
 
     if args.server:
         server_bind_address, sep, server_port = args.server.rpartition(":")
@@ -477,78 +556,11 @@ it waits for the next connect.
 
     try:
         while True:
-            # The two sides of the serial connection should synchronise
-            sync_timeout = 0.1
-            while not do_synchronise(ser=ser, ser_to_net=ser_to_net, name=name,
-                                debug=args.debug, is_client=bool(args.client), timeout=sync_timeout):
-                sync_timeout = min(10.0, sync_timeout * 1.5)
-
-            # The connection is not yet set up. A connection to the server will begin it.
-            if args.server:
-                sys.stderr.write('{}: serial link ok, waiting for connection on {}:{}...\n'.format(
-                        name, server_bind_address, server_port))
-
-                client_socket = do_server_accept_connection(
-                            ser_to_net=ser_to_net, server_socket=server_socket, name=name)
-                if client_socket is None:
-                    # Go back to synchronising
-                    continue
-
-                do_server_configure_socket(client_socket=client_socket, timeout=RETRY_TIMEOUT)
-                ser_to_net.set_socket(client_socket)
-
-                # Tell the other side of the serial cable to connect
-                ser.write(ST_ESCAPE + ST_CONNECT)
-
-                # Wait for the client to connect to the TCP port
-                if not do_server_await_client_connect(ser_to_net=ser_to_net, name=name,
-                                client_socket=client_socket, timeout=args.timeout):
-                    # Go back to synchronising
-                    continue
-
-            else:
-                sys.stderr.write('{}: serial link ok, waiting for connection on {}...\n'.format(name, args.serialport))
-
-                # Await connect message from the other side of the serial cable
-                if not do_client_await_serial_connect(ser_to_net=ser_to_net, name=name):
-                    # Go back to synchronising
-                    continue
-
-                client_socket = do_client_connect(client_host=client_host, name=name,
-                        client_port=int(client_port), timeout=args.timeout)
-                if client_socket is None:
-                    # Tell the other side that the connection failed
-                    ser.write(ST_ESCAPE + ST_CONNECTION_FAILED)
-                    # Go back to synchronising
-                    continue
-
-                ser_to_net.set_socket(client_socket)
-
-                # Tell the other side of the serial cable that the connection is done
-                ser.write(ST_ESCAPE + ST_CONNECTED)
-
-            # Start code indicates that the next bytes should be relayed
-            ser.write(ST_ESCAPE + ST_START)
-
-            try:
-                # enter network <-> serial loop
-                client_socket.settimeout(RETRY_TIMEOUT)
-                while do_network_to_serial_loop(ser_to_net=ser_to_net,
-                            ser=ser, client_socket=client_socket):
-                    pass
-
-            except KeyboardInterrupt:
-                raise
-            except socket.error as msg:
-                sys.stderr.write('{}: ERROR: {}\n'.format(name, msg))
-            except ConnectionResetError:
-                pass
-            finally:
-                ser_to_net.disconnect()
-
-                sys.stderr.write('{}: disconnected\n'.format(name))
-                client_socket.close()
-                ser.write(ST_ESCAPE + ST_DISCONNECT)
+            do_main_loop(ser=ser, ser_to_net=ser_to_net, name=name,
+                        debug=args.debug, server_socket=server_socket,
+                        server_bind_address=server_bind_address, server_port=int(server_port),
+                        client_host=client_host, client_port=int(client_port),
+                        timeout=args.timeout, serialport=args.serialport)
 
     except KeyboardInterrupt:
         pass
