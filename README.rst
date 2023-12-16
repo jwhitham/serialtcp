@@ -1,0 +1,63 @@
+===========
+ serialtcp
+===========
+
+Overview
+========
+
+This program redirects a TCP connection via a serial port.
+
+The program should run on both sides of a serial connection:
+* On one side, it acts as a TCP server, and any connection to its TCP port
+  will be forwarded across the serial cable.
+* On the other side, it acts as a TCP client, and any connection via the
+  serial cable will be forwarded to a specified IP address and port number.
+
+Usage
+=====
+
+Use this program to provide access to a TCP service
+without needing to establish a network connection.
+
+For example, on one side, acting as a TCP server on port 1234:
+
+    python serialtcp.py --server 1234 /dev/ttyUSB0
+    
+And on the other side, acting as a TCP client which will connect to 192.168.0.1 on port 22:
+
+    python serialtcp.py --client 192.168.0.1:22 /dev/ttyUSB0 
+
+When both copies of the program are running, they will synchronise over the serial cable.
+Then, the first connection to port 1234 will be forwarded to 192.168.0.1:22.
+
+Limitations
+===========
+
+No security measures are implemented. Anyone can remotely connect
+to this service. By default the server port only binds to localhost interfaces.
+
+Only one connection at once is supported. When the connection is terminated
+it waits for the next connect.
+
+The protocol uses escape codes to represent events such as connection and
+disconnection, and therefore the connection works much like a TCP stream,
+but TCP error conditions and settings like NODELAY are not carried across the link.
+
+There is no support for other protocols (e.g. UDP).
+
+If you need multiple simultaneous connections, proper handling of error conditions,
+authentication or support for other protocols you should consider using PPP or SLIP.
+
+You cannot use this program to simply expose a serial port as a TCP service
+which can be used via `telnet` or `netcat`. If this is what you need, consider using
+https://github.com/pyserial/pyserial/blob/master/examples/tcp_serial_redirect.py instead.
+
+Acknowledgments
+===============
+
+This program is based on an example from `pyserial`
+copied from https://github.com/pyserial/pyserial/blob/master/examples/tcp_serial_redirect.py
+and written by Chris Liechti. Thanks, Chris, for your work on `pyserial`!
+
+See https://github.com/pyserial/pyserial
+

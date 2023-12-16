@@ -31,7 +31,7 @@ def wait_for_server() -> None:
 def main() -> None:
     print("Set up both ends of the connection...", flush=True)
     client = subprocess.Popen(PROGRAM + ["-c", SSH_SERVER, DEVICE_0, str(SPEED)], stdin=subprocess.DEVNULL)
-    server = subprocess.Popen(PROGRAM + ["-P", str(LOCAL_PORT), DEVICE_1, str(SPEED)], stdin=subprocess.DEVNULL)
+    server = subprocess.Popen(PROGRAM + ["-s", str(LOCAL_PORT), DEVICE_1, str(SPEED)], stdin=subprocess.DEVNULL)
 
     try:
         with open("/dev/urandom", "rb") as fd:
@@ -67,7 +67,7 @@ def main() -> None:
             # Additional fast connect/disconnect tests
             for i in range(3):
                 wait_for_server()
-        
+
         print("Transfer rate: {:1.0f} bps (actual data) at speed {:1.0f} bps (over the wire)".format(
                 (TEST_DATA_SIZE * TEST_CYCLES * 8) / (end_time - start_time),
                 SPEED))
