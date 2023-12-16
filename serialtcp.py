@@ -12,83 +12,117 @@
 
 import sys
 import socket
-import serial
-import serial.threaded
+import serial  # type: ignore
+import serial.threaded  # type: ignore
 import time
 import threading
+import argparse
+import typing
+import collections
 
+ControlCommand = bytes
 ST_ESCAPE = b"\x1f"
 ST_CONNECTED = b"c"
 ST_CONNECT = b"C"
 ST_CONNECTION_FAILED = b"F"
 ST_DISCONNECTED = b"D"
 ST_START = b"s"
+ST_SERVER_HELLO_1 = b"\xe0"
+ST_SERVER_HELLO_2 = b"\xe1"
+ST_CLIENT_HELLO_1 = b"\xe2"
+ST_CLIENT_HELLO_2 = b"\xe3"
 ST_NUL = b"\x00" # sent first to be sure we are not in the escape state
 
 class SerialToNet(serial.threaded.Protocol):
     """serial->socket"""
 
-    def __init__(self):
-        self.socket = None
-        self.escape = False
-        self.started = False
-        self.control_messages = set()
-        self.message_lock = threading.Condition()
-        self.socket_lock = threading.Condition()
+    def __init__(self, name: str, debug: bool) -> None:
+        self.__name = name
+        self.__debug = debug
+        self.__socket: typing.Optional[socket.socket] = None
+        self.__escape = False
+        self.__started = False
+        self.__control_message_queue: typing.Deque[ControlCommand] = collections.deque()
+        self.__message_lock = threading.Condition()
 
-    def __call__(self):
+    def __call__(self) -> serial.threaded.Protocol:
         return self
 
-    def data_received(self, data):
+    def get_control_message(self, timeout=0.0) -> typing.Optional[ControlCommand]:
+        with self.__message_lock:
+            # Get a message from the front of the queue, if any
+            if len(self.__control_message_queue) != 0:
+                return self.__control_message_queue.popleft()
+
+            # Wait for the timeout and try again.
+            if timeout > 0.0:
+                self.__message_lock.wait(timeout)
+                if len(self.__control_message_queue) != 0:
+                    return self.__control_message_queue.popleft()
+
+        return None
+
+    def __push_command(self, code: ControlCommand) -> None:
+        with self.__message_lock:
+            self.__control_message_queue.append(code)
+            self.__message_lock.notify_all()
+
+        if code == ST_START and self.__socket is not None:
+            self.__started = True
+        if code == ST_DISCONNECTED:
+            self.__started = False
+            self.__socket = None
+
+    def disconnect(self) -> None:
+        self.__push_command(ST_DISCONNECTED)
+
+    def set_socket(self, s: socket.socket) -> None:
+        self.__socket = s
+        self.__started = False
+
+    def data_received(self, data: bytes) -> None:
+        # Filter for commands and escape codes
+        if self.__debug:
+            sys.stderr.write('{}: receive data: {}\n'.format(self.__name, repr(data)))
         i = 0
         while i < len(data):
             code = data[i:i+1]
-            if self.escape:
+            if self.__escape:
                 if code != ST_ESCAPE:
                     # A command of some kind - removed from the input
-                    with self.message_lock:
-                        self.control_messages.add(code)
-                        self.message_lock.notify_all()
-                    if code == ST_START:
-                        self.started = True
-                    if code == ST_DISCONNECTED:
-                        self.started = False
+                    self.__push_command(code)
+
+                    # Remove from input
                     data = data[:i] + data[i+1:]
-                elif not self.started:
+                elif not self.__started:
                     # Junk before start - removed
                     data = data[:i] + data[i+1:]
                 else:
                     # Literal ST_ESCAPE character - kept in the input
                     i += 1
-                self.escape = False
+
+                self.__escape = False
             else:
                 if code == ST_ESCAPE:
                     # Escape code - removed from the input
-                    self.escape = True
+                    self.__escape = True
                     data = data[:i] + data[i+1:]
-                elif not self.started:
+                elif not self.__started:
                     # Junk before start - removed
                     data = data[:i] + data[i+1:]
                 else:
                     # Literal character
                     i += 1
 
+        # Forward remaining data to the socket
         try:
-            with self.socket_lock:
-                if self.socket is not None:
-                    self.socket.sendall(data)
+            if self.__socket is not None:
+                self.__socket.sendall(data)
         except Exception:
             # In the event of an unexpected disconnection, try to stop
-            with self.socket_lock:
-                self.socket = None
-            with self.message_lock:
-                self.control_messages.add(ST_DISCONNECTED)
-                self.message_lock.notify_all()
-            self.started = False
+            self.disconnect()
 
-if __name__ == '__main__':  # noqa
-    import argparse
-
+def main() -> None:
     parser = argparse.ArgumentParser(
         description='Simple Serial to Network (TCP/IP) redirector.',
         epilog="""\
@@ -117,9 +151,9 @@ it waits for the next connect.
         default=False)
 
     parser.add_argument(
-        '--develop',
+        '--debug',
         action='store_true',
-        help='Development mode, prints Python internals on errors',
+        help='Development mode, prints data received',
         default=False)
 
     parser.add_argument(
@@ -222,7 +256,8 @@ it waits for the next connect.
         sys.stderr.write('Could not open serial port {}: {}\n'.format(ser.name, e))
         sys.exit(1)
 
-    ser_to_net = SerialToNet()
+    name = "Client" if args.client else "Server"
+    ser_to_net = SerialToNet(name, args.debug)
     serial_worker = serial.threaded.ReaderThread(ser, ser_to_net)
     serial_worker.start()
 
@@ -234,11 +269,43 @@ it waits for the next connect.
     try:
         intentional_exit = False
         while True:
+            # The two sides of the serial connection should synchronise
+            ready = False
+            to_send = [ST_SERVER_HELLO_1, ST_SERVER_HELLO_2]
+            to_receive = [ST_CLIENT_HELLO_1, ST_CLIENT_HELLO_2]
+            if args.client:
+                (to_send, to_receive) = (to_receive, to_send)
+
+            sys.stderr.write('{}: waiting for serial link on {}...\n'.format(name, args.SERIALPORT))
+            while not ready:
+                for i in range(len(to_send)):
+                    ser.write(ST_NUL + ST_ESCAPE + to_send[i])
+                    timeout_at = time.monotonic() + 5.0
+                    code = ser_to_net.get_control_message(1.0)
+                    while ((code != to_receive[i])
+                    and (code not in to_send)
+                    and (time.monotonic() <= timeout_at)):
+                        code = ser_to_net.get_control_message(1.0)
+
+                    if code == to_receive[-1]:
+                        # Appears to be ready
+                        ready = True
+
+                    if code in to_send:
+                        sys.stderr.write('WARNING: Misconfiguration or echo detected. '
+                            'One side should use -c, the other should use -P.\n')
+                        break
+
+                    if code is None:
+                        # Try again - other side not ready yet
+                        break
+
             # The connection is not yet set up. A connection to the server will begin it.
             if not args.client:
-                sys.stderr.write('Waiting for connection on {}...\n'.format(args.localport))
+                sys.stderr.write('{}: serial link ok, waiting for connection on port {}...\n'.format(name, args.localport))
                 client_socket, addr = srv.accept()
-                sys.stderr.write('Connected by {}\n'.format(addr))
+                (client_host, client_port) = addr
+                sys.stderr.write('{}: connection from {}:{}\n'.format(name, client_host, client_port))
                 # More quickly detect bad clients who quit without closing the
                 # connection: After 1 second of idle, start sending TCP keep-alive
                 # packets every 1 second. If 3 consecutive keep-alive packets
@@ -252,68 +319,62 @@ it waits for the next connect.
                     pass # XXX not available on windows
                 client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-                with ser_to_net.socket_lock:
-                    ser_to_net.socket = client_socket
+                ser_to_net.set_socket(client_socket)
 
                 # Tell the other side of the serial cable to connect
-                ser.write(ST_NUL + ST_ESCAPE + ST_CONNECT)
+                ser.write(ST_ESCAPE + ST_CONNECT)
 
                 # Await message indicating connection or failure
-                with ser_to_net.message_lock:
-                    timeout_at = time.monotonic() + args.timeout
-                    messages_copy = set(ser_to_net.control_messages)
-                    while ((ST_CONNECTED not in messages_copy)
-                    and (ST_CONNECTION_FAILED not in messages_copy)
-                    and (time.monotonic() <= timeout_at)):
-                        ser_to_net.message_lock.wait(0.1)
-                        messages_copy = set(ser_to_net.control_messages)
+                timeout_at = time.monotonic() + args.timeout
+                code = ser_to_net.get_control_message(0.1)
+                while ((code != ST_CONNECTED)
+                and (code != ST_CONNECTION_FAILED)
+                and (time.monotonic() <= timeout_at)):
+                    code = ser_to_net.get_control_message(0.1)
 
-                    ser_to_net.control_messages.clear()
-                    if ST_CONNECTION_FAILED in messages_copy:
-                        sys.stderr.write('ERROR: Connection failed on the other side\n')
-                        client_socket.close()
-                        continue
-                    if ST_CONNECTED not in messages_copy:
-                        sys.stderr.write('ERROR: Connection timeout on the other side\n')
-                        client_socket.close()
-                        continue
+                if code == ST_CONNECTION_FAILED:
+                    sys.stderr.write('{}: ERROR: Connection failed on the client side\n'.format(name))
+                    client_socket.close()
+                    continue
+                if code != ST_CONNECTED:
+                    sys.stderr.write('{}: ERROR: Connection timeout on the client side\n'.format(name))
+                    client_socket.close()
+                    continue
 
             else:
-                # Await connect message from the other side of the serial cable
-                with ser_to_net.message_lock:
-                    while ST_CONNECT not in ser_to_net.control_messages:
-                        ser_to_net.message_lock.wait()
-                    ser_to_net.control_messages.clear()
+                sys.stderr.write('{}: serial link ok, waiting for connection on port {}...\n'.format(name, args.SERIALPORT))
 
-                host, port = args.client.split(':')
-                sys.stderr.write("Opening connection to {}:{}...\n".format(host, port))
+                # Await connect message from the other side of the serial cable
+                while ser_to_net.get_control_message(1000.0) != ST_CONNECT:
+                    pass
+
+                client_host, client_port = args.client.split(':')
+                sys.stderr.write("{}: Connecting to {}:{}...\n".format(name, client_host, client_port))
                 client_socket = socket.socket()
                 client_socket.settimeout(args.timeout)
                 try:
-                    client_socket.connect((host, int(port)))
+                    client_socket.connect((client_host, int(client_port)))
                 except socket.error as msg:
-                    sys.stderr.write('WARNING: {}\n'.format(msg))
+                    sys.stderr.write('{}: ERROR: Connection failed: {}\n'.format(name, msg))
                     # Tell the other side that the connection failed
                     ser.write(ST_ESCAPE + ST_CONNECTION_FAILED)
                     continue
-                sys.stderr.write('Connected\n')
+                sys.stderr.write('{}: connected\n'.format(name))
                 client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-                with ser_to_net.socket_lock:
-                    ser_to_net.socket = client_socket
+                ser_to_net.set_socket(client_socket)
 
-                ser.write(ST_NUL + ST_ESCAPE + ST_CONNECTED)
+                ser.write(ST_ESCAPE + ST_CONNECTED)
 
             # Start code indicates that the next bytes should be relayed
             ser.write(ST_ESCAPE + ST_START)
+
             try:
                 # enter network <-> serial loop
                 client_socket.settimeout(0.1)
                 while True:
-                    with ser_to_net.message_lock:
-                        if ST_DISCONNECTED in ser_to_net.control_messages:
-                            ser_to_net.control_messages.clear()
-                            break # Disconnected
+                    if ser_to_net.get_control_message() == ST_DISCONNECTED:
+                        break # Disconnected
 
                     try:
                         data = client_socket.recv(4096)
@@ -344,13 +405,10 @@ it waits for the next connect.
                 sys.stderr.write('ERROR: {}\n'.format(msg))
             except ConnectionResetError:
                 pass
-            except Disconnected:
-                pass
             finally:
-                with ser_to_net.socket_lock:
-                    ser_to_net.socket = None
+                ser_to_net.disconnect()
 
-                sys.stderr.write('Disconnected\n')
+                sys.stderr.write('{}: Disconnected\n'.format(name))
                 client_socket.close()
                 ser.write(ST_ESCAPE + ST_DISCONNECTED)
 
@@ -359,3 +417,6 @@ it waits for the next connect.
 
     sys.stderr.write('\n--- exit ---\n')
     serial_worker.stop()
+
+if __name__ == '__main__':
+    main()

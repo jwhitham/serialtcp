@@ -47,6 +47,7 @@ def main() -> None:
             wait_for_server()
             print(flush=True, end="")
 
+            # The main part of the test
             start_time = time.monotonic()
             for i in range(TEST_CYCLES):
                 print(f"Test cycle {i}",  flush=True)
@@ -62,10 +63,16 @@ def main() -> None:
                 assert rc == 0
 
             end_time = time.monotonic()
+
+            # Additional fast connect/disconnect tests
+            for i in range(3):
+                wait_for_server()
         
         print("Transfer rate: {:1.0f} bps (actual data) at speed {:1.0f} bps (over the wire)".format(
                 (TEST_DATA_SIZE * TEST_CYCLES * 8) / (end_time - start_time),
                 SPEED))
+    except KeyboardInterrupt:
+        pass
     finally:
         client.kill()
         server.kill()
