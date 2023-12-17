@@ -27,6 +27,7 @@ ST_CONNECT = b"C"
 ST_CONNECTION_FAILED = b"F"
 ST_DISCONNECT = b"D"
 ST_START = b"s"
+ST_SERVER_HELLO_0 = b"\xe0"
 ST_SERVER_HELLO_1 = b"\xe1"
 ST_SERVER_HELLO_2 = b"\xe2"
 ST_CLIENT_HELLO_1 = b"\xc1"
@@ -161,6 +162,11 @@ def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
     # Send disconnect to force the other side to be ready to sync if it's connected
     ser.write(ST_ESCAPE + ST_DISCONNECT)
 
+    # A server sends an initial optional message to tell a client it is ready;
+    # this helps faster synchronisatio if the client is already running.
+    if not is_client:
+        ser.write(ST_ESCAPE + ST_SERVER_HELLO_0)
+
     # Send each message
     for i in range(len(to_send)):
         # Client takes the initiative and sends a message first
@@ -178,6 +184,10 @@ def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
                 # Getting back what we are sending? Bad sign!
                 sys.stderr.write('WARNING: Misconfiguration or echo detected. '
                     'One side should use --client, the other should use --server.\n')
+                return False
+
+            if (code == ST_SERVER_HELLO_0) and is_client:
+                # Server just became ready. Immediate restart of sync.
                 return False
 
             if (code in to_receive) and (code != to_receive[i]):
@@ -221,7 +231,7 @@ def do_server_accept_connection(ser_to_net: SerialToNet, name: str,
                 code = ser_to_net.get_control_message()
 
             if code == ST_DISCONNECT:
-                sys.stderr.write('{}: ERROR: Connection aborted by the client side\n'.format(name))
+                # Client went offline - return to sync state
                 return None
 
 def do_server_configure_socket(client_socket: socket.socket, timeout: float) -> None:
@@ -275,7 +285,7 @@ def do_client_await_serial_connect(ser_to_net: SerialToNet, name: str) -> bool:
         code = ser_to_net.get_control_message(1000.0)
 
     if code == ST_DISCONNECT:
-        sys.stderr.write('{}: ERROR: Connection aborted by the server side\n'.format(name))
+        # Server went offline - return to sync state
         return False
 
     return True
@@ -332,10 +342,10 @@ def do_main_loop(ser: serial.Serial, ser_to_net: SerialToNet, name: str,
             debug: bool, timeout: float, serialport: str) -> None:
 
     # The two sides of the serial connection should synchronise
-    sync_timeout = 0.1
+    sync_timeout = 1.0
     while not do_synchronise(ser=ser, ser_to_net=ser_to_net, name=name,
                         debug=debug, is_client=server_socket is None, timeout=sync_timeout):
-        sync_timeout = min(10.0, sync_timeout * 1.5)
+        sync_timeout = min(60.0, sync_timeout * 1.5)
 
     # The connection is not yet set up. A connection to the server will begin it.
     if server_socket is not None:
