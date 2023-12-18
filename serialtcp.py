@@ -163,7 +163,7 @@ def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
     ser.write(ST_ESCAPE + ST_DISCONNECT)
 
     # A server sends an initial optional message to tell a client it is ready;
-    # this helps faster synchronisatio if the client is already running.
+    # this helps faster synchronisation if the client is already running.
     if not is_client:
         ser.write(ST_ESCAPE + ST_SERVER_HELLO_0)
 
@@ -192,7 +192,6 @@ def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
 
             if (code in to_receive) and (code != to_receive[i]):
                 # Restart sync if the wrong message was received
-                sys.stderr.write('WARNING: Ignored out-of-sequence sync message\n')
                 return False
 
             if (code is None) and (time.monotonic() >= timeout_at):
@@ -221,7 +220,8 @@ def do_server_accept_connection(ser_to_net: SerialToNet, name: str,
     while True:
         try:
             (client_socket, addr) = server_socket.accept()
-            (client_host, client_port) = addr
+            client_host = addr[0]
+            client_port = addr[1]
             sys.stderr.write('{}: connection from {}:{}\n'.format(name, client_host, client_port))
             return client_socket
         except TimeoutError:
@@ -290,10 +290,11 @@ def do_client_await_serial_connect(ser_to_net: SerialToNet, name: str) -> bool:
 
     return True
 
-def do_client_connect(client_host: str, client_port: int, timeout: float, name: str) -> typing.Optional[socket.socket]:
+def do_client_connect(client_host: str, client_port: int,
+            timeout: float, name: str, address_family: int) -> typing.Optional[socket.socket]:
     """Connect to a TCP port."""
     sys.stderr.write("{}: connecting to {}:{}...\n".format(name, client_host, client_port))
-    client_socket = socket.socket()
+    client_socket = socket.socket(address_family, socket.SOCK_STREAM)
     client_socket.settimeout(timeout)
     try:
         client_socket.connect((client_host, int(client_port)))
@@ -339,7 +340,8 @@ def do_network_to_serial_loop(ser_to_net: SerialToNet, ser: serial.Serial,
 def do_main_loop(ser: serial.Serial, ser_to_net: SerialToNet, name: str,
             server_socket: typing.Optional[socket.socket], server_bind_address: str, server_port: int,
             client_host: str, client_port: int,
-            debug: bool, timeout: float, serialport: str) -> None:
+            debug: bool, timeout: float, serialport: str,
+            address_family: int) -> None:
 
     # The two sides of the serial connection should synchronise
     sync_timeout = 1.0
@@ -379,7 +381,8 @@ def do_main_loop(ser: serial.Serial, ser_to_net: SerialToNet, name: str,
             return
 
         client_socket = do_client_connect(client_host=client_host, name=name,
-                client_port=client_port, timeout=timeout)
+                client_port=client_port, timeout=timeout,
+                address_family=address_family)
         if client_socket is None:
             # Tell the other side that the connection failed
             ser.write(ST_ESCAPE + ST_CONNECTION_FAILED)
@@ -458,6 +461,11 @@ it waits for the next connect.
         '--log',
         help='Log file name prefix')
 
+    parser.add_argument(
+        '-6', '--ipv6',
+        action='store_true',
+        help='Use IPv6')
+
     group = parser.add_argument_group('serial port')
 
     group.add_argument(
@@ -478,12 +486,6 @@ it waits for the next connect.
         '--rtscts',
         action='store_true',
         help='enable RTS/CTS flow control (default off)',
-        default=False)
-
-    group.add_argument(
-        '--xonxoff',
-        action='store_true',
-        help='enable software flow control (default off)',
         default=False)
 
     group.add_argument(
@@ -525,7 +527,7 @@ it waits for the next connect.
     ser.parity = args.parity
     ser.stopbits = args.stopbits
     ser.rtscts = args.rtscts
-    ser.xonxoff = args.xonxoff
+    ser.xonxoff = False
 
     if args.rts is not None:
         ser.rts = args.rts
@@ -548,13 +550,14 @@ it waits for the next connect.
     client_host = server_bind_address = ""
     client_port = server_port = "0"
     server_socket: typing.Optional[socket.socket] = None
+    address_family = socket.AF_INET6 if args.ipv6 else socket.AF_INET
 
     if args.server:
         server_bind_address, sep, server_port = args.server.rpartition(":")
         if sep == "":
             server_bind_address = "localhost"
             server_port = args.server
-        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket = socket.socket(address_family, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.settimeout(RETRY_TIMEOUT)
         server_socket.bind((server_bind_address, int(server_port)))
@@ -572,7 +575,8 @@ it waits for the next connect.
                         debug=args.debug, server_socket=server_socket,
                         server_bind_address=server_bind_address, server_port=int(server_port),
                         client_host=client_host, client_port=int(client_port),
-                        timeout=args.timeout, serialport=args.serialport)
+                        timeout=args.timeout, serialport=args.serialport,
+                        address_family=address_family)
 
     except KeyboardInterrupt:
         pass

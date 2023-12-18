@@ -3,23 +3,27 @@
 import subprocess, tempfile, time, socket
 from pathlib import Path
 
+IPV6 = False
 PROGRAM = ["python", "../serialtcp.py"]
 DEVICE_0 = "/dev/ttyUSB0"
 DEVICE_1 = "/dev/ttyUSB1"
 SPEED = 115200 * 8
-SSH_SERVER = "localhost:22"
+LOCAL_ADDRESS = "localhost"
+SSH_SERVER = LOCAL_ADDRESS + ":22"
 LOCAL_PORT = 1234
 TEST_DATA_SIZE = 1 << 20
 TEST_CYCLES = 16
+ADDRESS_FAMILY = socket.AF_INET6 if IPV6 else socket.AF_INET
+IPV6_OPTION = ["-6"] if IPV6 else []
 
 
 def wait_for_server() -> None:
     end_time = time.monotonic() + 10.0
     while time.monotonic() < end_time:
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s = socket.socket(ADDRESS_FAMILY, socket.SOCK_STREAM)
             s.settimeout(1.0)
-            s.connect(("localhost", LOCAL_PORT))
+            s.connect((LOCAL_ADDRESS, LOCAL_PORT))
             s.close()
             return  # Connected!
         except socket.error:
@@ -30,8 +34,12 @@ def wait_for_server() -> None:
 
 def main() -> None:
     print("Set up both ends of the connection...", flush=True)
-    client = subprocess.Popen(PROGRAM + ["-c", SSH_SERVER, DEVICE_0, str(SPEED)], stdin=subprocess.DEVNULL)
-    server = subprocess.Popen(PROGRAM + ["-s", str(LOCAL_PORT), DEVICE_1, str(SPEED)], stdin=subprocess.DEVNULL)
+    client = subprocess.Popen(PROGRAM +
+            IPV6_OPTION + ["-c", SSH_SERVER, DEVICE_0, str(SPEED)],
+            stdin=subprocess.DEVNULL)
+    server = subprocess.Popen(PROGRAM +
+            IPV6_OPTION + ["-s", str(LOCAL_PORT), DEVICE_1, str(SPEED)],
+            stdin=subprocess.DEVNULL)
 
     try:
         with open("/dev/urandom", "rb") as fd:
@@ -52,7 +60,8 @@ def main() -> None:
             for i in range(TEST_CYCLES):
                 print(f"Test cycle {i}",  flush=True)
                 with open(output_file, "wb") as fd:
-                    rc = subprocess.call(["ssh", "-p", str(LOCAL_PORT), "localhost", "cat"],
+                    rc = subprocess.call(["ssh"] + IPV6_OPTION + [
+                            "-p", str(LOCAL_PORT), LOCAL_ADDRESS, "cat"],
                                 stdin=open(input_file, "rb"), stdout=fd)
 
                 with open(output_file, "rb") as fd:
