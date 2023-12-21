@@ -466,6 +466,11 @@ it waits for the next connect.
         action='store_true',
         help='Use IPv6')
 
+    # This paramater is just for testing, and creates a file containing the server port number
+    parser.add_argument(
+        '--test-port-file',
+        help=argparse.SUPPRESS)
+
     group = parser.add_argument_group('serial port')
 
     group.add_argument(
@@ -521,7 +526,7 @@ it waits for the next connect.
     assert not (args.client and args.server)
 
     # connect to serial port
-    ser = serial.serial_for_url(args.serialport, do_not_open=True)
+    ser = serial.serial_for_url(args.serialport, do_not_open=True, exclusive=True)
     ser.baudrate = args.baudrate
     ser.bytesize = 8
     ser.parity = args.parity
@@ -561,8 +566,12 @@ it waits for the next connect.
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.settimeout(RETRY_TIMEOUT)
         server_socket.bind((server_bind_address, int(server_port)))
+        server_port = str(server_socket.getsockname()[1])
         server_socket.listen(0)
         sys.stderr.write(f'{name}: serialtcp.py TCP service listening on {server_bind_address}:{server_port}\n')
+        if args.test_port_file:
+            with open(args.test_port_file, "wt") as fd:
+                fd.write(f"{server_port}\n")
     else:
         client_host, sep, client_port = args.client.rpartition(":")
         sys.stderr.write(f'{name}: serialtcp.py TCP client will connect to {client_host}:{client_port}\n')
