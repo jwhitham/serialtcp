@@ -32,7 +32,6 @@ ST_SERVER_HELLO_1 = b"\xe1"
 ST_SERVER_HELLO_2 = b"\xe2"
 ST_CLIENT_HELLO_1 = b"\xc1"
 ST_CLIENT_HELLO_2 = b"\xc2"
-ST_NUL = b"\x00" # sent first to be sure we are not in the escape state
 
 RETRY_TIMEOUT = 1.0
 
@@ -87,7 +86,7 @@ class SerialToNet:
     def data_received(self, data: bytes) -> None:
         # Filter for commands and escape codes
         if self.__debug:
-            sys.stderr.write('{}: receive data: {}\n'.format(self.__name, repr(data)))
+            sys.stderr.write('{}: receive serial: {}\n'.format(self.__name, repr(data)))
         i = 0
         while i < len(data):
             code = data[i:i+1]
@@ -121,6 +120,8 @@ class SerialToNet:
         # Forward remaining data to the socket
         try:
             if self.__socket is not None:
+                if self.__debug:
+                    sys.stderr.write('{}: forward data: {}\n'.format(self.__name, repr(data)))
                 self.__socket.sendall(data)
         except Exception:
             # In the event of an unexpected disconnection, try to stop
@@ -156,11 +157,12 @@ def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
     while ser_to_net.get_control_message() is not None:
         pass
 
-    # Clear the escape flag on the other side
-    ser.write(ST_NUL)
-
     # Send disconnect to force the other side to be ready to sync if it's connected
-    ser.write(ST_ESCAPE + ST_DISCONNECT)
+    # The other side might be connected and in the escape state, in which case this will be
+    # received as two literal characters. This is bad luck. The alternative is to
+    # send some other character first, to clear the escape state, but then that will be
+    # received as a literal character if it's NOT in the escape state - which is more likely..
+    ser.write(ST_ESCAPE + ST_DISCONNECT + ST_ESCAPE + ST_DISCONNECT)
 
     # A server sends an initial optional message to tell a client it is ready;
     # this helps faster synchronisation if the client is already running.
@@ -307,7 +309,7 @@ def do_client_connect(client_host: str, client_port: int,
     return client_socket
 
 def do_network_to_serial_loop(ser_to_net: SerialToNet, ser: serial.Serial,
-                client_socket: socket.socket) -> bool:
+                client_socket: socket.socket, name: str, debug: bool) -> bool:
     """Transfer data from network packets to serial."""
     if ser_to_net.get_control_message() == ST_DISCONNECT:
         return False # Disconnected
@@ -315,10 +317,17 @@ def do_network_to_serial_loop(ser_to_net: SerialToNet, ser: serial.Serial,
     try:
         data = client_socket.recv(4096)
     except TimeoutError:
+        if debug:
+            sys.stderr.write('{}: receive network timeout\n'.format(name))
         return True
 
     if data == b"":
+        if debug:
+            sys.stderr.write('{}: receive network end\n'.format(name))
         return False # Disconnected
+
+    if debug:
+        sys.stderr.write('{}: receive network: {}\n'.format(name, repr(data)))
 
     i = 0
     while i < len(data):
@@ -400,8 +409,8 @@ def do_main_loop(ser: serial.Serial, ser_to_net: SerialToNet, name: str,
     # enter network <-> serial loop
     try:
         client_socket.settimeout(RETRY_TIMEOUT)
-        while do_network_to_serial_loop(ser_to_net=ser_to_net,
-                    ser=ser, client_socket=client_socket):
+        while do_network_to_serial_loop(ser_to_net=ser_to_net, debug=debug,
+                    ser=ser, client_socket=client_socket, name=name):
             pass
     except socket.error as msg:
         sys.stderr.write('{}: ERROR: {}\n'.format(name, msg))
@@ -455,6 +464,7 @@ it waits for the next connect.
     parser.add_argument(
         '--timeout',
         help='Connection timeout (seconds)',
+        type=float,
         default=10.0)
 
     parser.add_argument(

@@ -7,11 +7,11 @@ import subprocess, time, random, struct, sys, typing
 from pathlib import Path
 
 LOCAL_ADDRESS = "localhost"
-PROGRAM = [sys.executable, str(Path(__file__).parent.parent / "serialtcp.py")]
+PROGRAM = [sys.executable, str(Path(__file__).parent / "serialtcp.py")]
 DEVICE_0 = "/dev/ttyUSB0"
 DEVICE_1 = "/dev/ttyUSB1"
 SPEED = 115200 * 8
-TIMEOUT = 10.0
+TEST_TIMEOUT = 10.0
 
 @pytest.fixture
 def loopback_port() -> typing.Iterator[int]:
@@ -36,7 +36,7 @@ def loopback_port() -> typing.Iterator[int]:
         server.shutdown()
 
 def connect_to_server(port: int) -> socket.socket:
-    end_time = time.monotonic() + TIMEOUT
+    end_time = time.monotonic() + TEST_TIMEOUT
     s: typing.Optional[socket.socket] = None
     while (time.monotonic() < end_time) and not s:
         try:
@@ -48,18 +48,20 @@ def connect_to_server(port: int) -> socket.socket:
             time.sleep(0.5)
             s = None
 
-    assert s is not None, f"Server was not reachable on port {port} within {TIMEOUT} seconds"
+    assert s is not None, f"Server was not reachable on port {port} within {TEST_TIMEOUT} seconds"
     s.settimeout(None)
     return s
 
-def start_server() -> typing.Tuple[subprocess.Popen, int]:
+def start_server(debug: bool) -> typing.Tuple[subprocess.Popen, int]:
     with tempfile.TemporaryDirectory() as td:
         tpf = Path(td) / "test-port-file"
         server = subprocess.Popen(PROGRAM +
-                ["-s", "0", "--test-port-file", str(tpf), DEVICE_1, str(SPEED)],
+                ["-s", "0", "--test-port-file", str(tpf),
+                DEVICE_1, str(SPEED)] +
+                (["--debug"] if debug else []),
                 stdin=subprocess.DEVNULL)
 
-        end_time = time.monotonic() + TIMEOUT
+        end_time = time.monotonic() + TEST_TIMEOUT
         port = 0
         while (time.monotonic() < end_time) and (port == 0):
             time.sleep(0.1)
@@ -70,23 +72,26 @@ def start_server() -> typing.Tuple[subprocess.Popen, int]:
                     port = int(port_text.strip())
             except Exception:
                 pass
-        assert port != 0, f"Server did not start up within {TIMEOUT} seconds"
+        assert port != 0, f"Server did not start up within {TEST_TIMEOUT} seconds"
 
     return (server, port)
 
+def start_client(port: int, debug: bool) -> subprocess.Popen:
+    return subprocess.Popen(PROGRAM +
+            ["-c", f"{LOCAL_ADDRESS}:{port}", DEVICE_0, str(SPEED)] +
+            (["--debug"] if debug else []),
+            stdin=subprocess.DEVNULL)
+
 @pytest.fixture
 def server_socket() -> typing.Iterator[socket.socket]:
-    (server, port) = start_server()
+    (server, port) = start_server(False)
     s = connect_to_server(port)
     yield s
     server.kill()
 
 @pytest.fixture
 def loopback_client(loopback_port: int) -> typing.Iterator[int]:
-    # Start client
-    client = subprocess.Popen(PROGRAM +
-            ["-c", f"{LOCAL_ADDRESS}:{loopback_port}", DEVICE_0, str(SPEED)],
-            stdin=subprocess.DEVNULL)
+    client = start_client(loopback_port, False)
     yield 0
     client.kill()
 
@@ -100,7 +105,7 @@ def receive_and_transmit(server_socket, size) -> None:
     bytes_sent = 0
     bytes_received = 0
     received: typing.List[bytes] = []
-    end_time = time.monotonic() + TIMEOUT
+    end_time = time.monotonic() + TEST_TIMEOUT
 
     while (bytes_received < size) and (time.monotonic() < end_time):
         if bytes_sent < size:
@@ -115,9 +120,17 @@ def receive_and_transmit(server_socket, size) -> None:
             received.append(incoming)
             bytes_received += len(incoming)
 
-    assert bytes_sent == size, f"Did not send {size} bytes within {TIMEOUT} seconds, only {bytes_sent}"
-    assert bytes_received == size, f"Did not receive {size} bytes within {TIMEOUT} seconds, only {bytes_sent}"
-    assert b"".join(received) == to_send, "Loopback data was corrupt"
+    got_back = b"".join(received)
+    if to_send.startswith(got_back):
+        print(f"to_send starts with got_back - {len(got_back)} checked")
+    else:
+        print("to_send does not start with got_back")
+        print("to_send =", repr(to_send[:20]))
+        print("got_back =", repr(got_back[:20]))
+
+    assert bytes_sent == size, f"Did not send {size} bytes within {TEST_TIMEOUT} seconds, only {bytes_sent}"
+    assert bytes_received == size, f"Did not receive {size} bytes within {TEST_TIMEOUT} seconds, only {bytes_received}"
+    assert got_back == to_send, "Loopback data was corrupt"
 
 def test_small_loopback(server_socket, loopback_client) -> None:
     """Send a series of small messages"""
@@ -135,18 +148,20 @@ def test_big_loopback(server_socket, loopback_client) -> None:
         receive_and_transmit(server_socket, 16000 + (i * 4000))
 
 def test_server_reconnect(server_socket, loopback_client) -> None:
-    """Disconnect from the server during the test, then reconnect"""
+    """Disconnect from the server during the test, then reconnect.
+    Checks that the link can be re-established."""
     receive_and_transmit(server_socket, 19)
     port = server_socket.getpeername()[1]
-    for i in range(2):
+    for i in range(5):
         server_socket.close()
         server_socket = connect_to_server(port)
         receive_and_transmit(server_socket, 20 + i)
 
 def test_server_restart(loopback_client) -> None:
-    """Stop the server during the test, then restart it, without restarting the client."""
-    for i in range(3):
-        (server, port) = start_server()
+    """Stop the server during the test, then restart it, without restarting the client.
+    Checks that the link can be re-established."""
+    for i in range(5):
+        (server, port) = start_server(False)
         try:
             try:
                 server_socket = connect_to_server(port)
@@ -155,3 +170,57 @@ def test_server_restart(loopback_client) -> None:
                 server_socket.close()
         finally:
             server.kill()
+
+def test_client_restart(loopback_port) -> None:
+    """Stop the client during the test, then restart it.
+    Link has to be re-established by reconnecting to the server."""
+
+    (server, port) = start_server(False)
+    try:
+        try:
+            server_socket = connect_to_server(port)
+            server_socket.settimeout(0.5)
+
+            # This part is sent ok
+            try:
+                client = start_client(loopback_port, True)
+                server_socket.sendall(b"11111")
+                received = server_socket.recv(5)
+                assert received == b"11111"
+            finally:
+                client.kill()
+
+            # None of the following message is received.
+            # The server sends the message on the serial line, but has no way of knowing
+            # that the client has gone. There is no response.
+            server_socket.send(b"22222")
+            with pytest.raises(TimeoutError):
+                server_socket.recv(1)
+
+            # Now we can restart the client; this will cause a resync. The server socket
+            # will be disconnected (FIN and RST messages).
+            try:
+                client = start_client(loopback_port, True)
+                time.sleep(1.0)
+                # This ought to result in Connection Reset By Peer, but we don't see that
+                # until the second message is sent
+                with pytest.raises(BrokenPipeError):
+                    server_socket.send(b"3")
+                    server_socket.send(b"3")
+
+                # Reconnect to the server in order to carry on
+                server_socket = connect_to_server(port)
+
+                server_socket.sendall(b"44444")
+                received = server_socket.recv(5)
+                assert received == b"44444"
+            finally:
+                client.kill()
+        finally:
+            server_socket.close()
+    finally:
+        server.kill()
+
+# Test: server can't reach the client
+# Test: client can't connect to the specified address:port
+# Test: loopback service shuts down while in progress
