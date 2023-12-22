@@ -248,5 +248,18 @@ def test_client_cant_reach_server() -> None:
     assert "unable to connect to remote" in stderr
     assert rc != 0
 
+# Test: server and client using different speeds
+def test_server_client_different_speed(server_socket) -> None:
+    """Client and server use different speeds and can't communicate."""
+    client = subprocess.Popen(PROGRAM +
+            ["-c", f"{LOCAL_ADDRESS}:1",
+            "--sync-timeout", "2.0", DEVICE_0, "9600"],
+            stdin=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, text=True)
+    (_, stderr) = client.communicate()
+    rc = client.wait()
+    assert "unable to connect to remote" in stderr
+    assert rc != 0
+
 # Test: client can't connect to the specified address:port
 # Test: loopback service shuts down while in progress
