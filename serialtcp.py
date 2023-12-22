@@ -19,6 +19,7 @@ import threading
 import argparse
 import typing
 import collections
+import math
 
 ControlCommand = bytes
 ST_ESCAPE = b"\x1f"
@@ -350,13 +351,21 @@ def do_main_loop(ser: serial.Serial, ser_to_net: SerialToNet, name: str,
             server_socket: typing.Optional[socket.socket], server_bind_address: str, server_port: int,
             client_host: str, client_port: int,
             debug: bool, timeout: float, serialport: str,
-            address_family: int) -> None:
+            address_family: int, sync_timeout: float) -> None:
 
     # The two sides of the serial connection should synchronise
-    sync_timeout = 1.0
+    attempt_timeout = 1.0
+    timeout_at = time.monotonic() + sync_timeout
     while not do_synchronise(ser=ser, ser_to_net=ser_to_net, name=name,
-                        debug=debug, is_client=server_socket is None, timeout=sync_timeout):
-        sync_timeout = min(60.0, sync_timeout * 1.5)
+                        debug=debug, is_client=server_socket is None,
+                        timeout=max(0.0,
+                            min(timeout_at - time.monotonic(), attempt_timeout))):
+        if time.monotonic() > timeout_at:
+            # No more attempts
+            sys.stderr.write('{}: unable to connect to remote via {}\n'.format(
+                        name, serialport))
+            sys.exit(2)
+        attempt_timeout = min(60.0, attempt_timeout * 1.5)
 
     # The connection is not yet set up. A connection to the server will begin it.
     if server_socket is not None:
@@ -476,10 +485,18 @@ it waits for the next connect.
         action='store_true',
         help='Use IPv6')
 
-    # This paramater is just for testing, and creates a file containing the server port number
+    # This parameter is just for testing, and creates a file containing the server port number
     parser.add_argument(
         '--test-port-file',
         help=argparse.SUPPRESS)
+
+    # Synchronisation timeout. Exit with an error if unable to synchronise
+    # within this time.
+    parser.add_argument(
+        '--sync-timeout',
+        type=float,
+        default=math.inf,
+        help='Timeout for synchronisation via the serial line (seconds)')
 
     group = parser.add_argument_group('serial port')
 
@@ -595,7 +612,7 @@ it waits for the next connect.
                         server_bind_address=server_bind_address, server_port=int(server_port),
                         client_host=client_host, client_port=int(client_port),
                         timeout=args.timeout, serialport=args.serialport,
-                        address_family=address_family)
+                        address_family=address_family, sync_timeout=args.sync_timeout)
 
     except KeyboardInterrupt:
         pass

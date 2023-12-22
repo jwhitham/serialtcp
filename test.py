@@ -52,13 +52,12 @@ def connect_to_server(port: int) -> socket.socket:
     s.settimeout(None)
     return s
 
-def start_server(debug: bool) -> typing.Tuple[subprocess.Popen, int]:
+def start_server(args: typing.List[str]) -> typing.Tuple[subprocess.Popen, int]:
     with tempfile.TemporaryDirectory() as td:
         tpf = Path(td) / "test-port-file"
         server = subprocess.Popen(PROGRAM +
                 ["-s", "0", "--test-port-file", str(tpf),
-                DEVICE_1, str(SPEED)] +
-                (["--debug"] if debug else []),
+                    DEVICE_1, str(SPEED)] + args,
                 stdin=subprocess.DEVNULL)
 
         end_time = time.monotonic() + TEST_TIMEOUT
@@ -76,22 +75,21 @@ def start_server(debug: bool) -> typing.Tuple[subprocess.Popen, int]:
 
     return (server, port)
 
-def start_client(port: int, debug: bool) -> subprocess.Popen:
+def start_client(port: int, args: typing.List[str]) -> subprocess.Popen:
     return subprocess.Popen(PROGRAM +
-            ["-c", f"{LOCAL_ADDRESS}:{port}", DEVICE_0, str(SPEED)] +
-            (["--debug"] if debug else []),
+            ["-c", f"{LOCAL_ADDRESS}:{port}", DEVICE_0, str(SPEED)] + args,
             stdin=subprocess.DEVNULL)
 
 @pytest.fixture
 def server_socket() -> typing.Iterator[socket.socket]:
-    (server, port) = start_server(False)
+    (server, port) = start_server([])
     s = connect_to_server(port)
     yield s
     server.kill()
 
 @pytest.fixture
 def loopback_client(loopback_port: int) -> typing.Iterator[int]:
-    client = start_client(loopback_port, False)
+    client = start_client(loopback_port, [])
     yield 0
     client.kill()
 
@@ -161,7 +159,7 @@ def test_server_restart(loopback_client) -> None:
     """Stop the server during the test, then restart it, without restarting the client.
     Checks that the link can be re-established."""
     for i in range(5):
-        (server, port) = start_server(False)
+        (server, port) = start_server([])
         try:
             try:
                 server_socket = connect_to_server(port)
@@ -175,7 +173,7 @@ def test_client_restart(loopback_port) -> None:
     """Stop the client during the test, then restart it.
     Link has to be re-established by reconnecting to the server."""
 
-    (server, port) = start_server(False)
+    (server, port) = start_server([])
     try:
         try:
             server_socket = connect_to_server(port)
@@ -183,9 +181,11 @@ def test_client_restart(loopback_port) -> None:
 
             # This part is sent ok
             try:
-                client = start_client(loopback_port, True)
+                client = start_client(loopback_port, [])
                 server_socket.sendall(b"11111")
-                received = server_socket.recv(5)
+                received = b""
+                for i in range(5):
+                    received += server_socket.recv(1)
                 assert received == b"11111"
             finally:
                 client.kill()
@@ -200,7 +200,7 @@ def test_client_restart(loopback_port) -> None:
             # Now we can restart the client; this will cause a resync. The server socket
             # will be disconnected (FIN and RST messages).
             try:
-                client = start_client(loopback_port, True)
+                client = start_client(loopback_port, [])
                 time.sleep(1.0)
                 # This ought to result in Connection Reset By Peer, but we don't see that
                 # until the second message is sent
@@ -212,7 +212,9 @@ def test_client_restart(loopback_port) -> None:
                 server_socket = connect_to_server(port)
 
                 server_socket.sendall(b"44444")
-                received = server_socket.recv(5)
+                received = b""
+                for i in range(5):
+                    received += server_socket.recv(1)
                 assert received == b"44444"
             finally:
                 client.kill()
@@ -222,5 +224,29 @@ def test_client_restart(loopback_port) -> None:
         server.kill()
 
 # Test: server can't reach the client
+def test_server_cant_reach_client() -> None:
+    """Client is not running. Server cannot synchronise."""
+    server = subprocess.Popen(PROGRAM +
+            ["-s", "0", "--sync-timeout", "2.0", DEVICE_1, str(SPEED)],
+            stdin=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, text=True)
+    (_, stderr) = server.communicate()
+    rc = server.wait()
+    assert "unable to connect to remote" in stderr
+    assert rc != 0
+
+# Test: client can't reach the server
+def test_client_cant_reach_server() -> None:
+    """Server is not running. Client cannot synchronise."""
+    client = subprocess.Popen(PROGRAM +
+            ["-c", f"{LOCAL_ADDRESS}:1",
+            "--sync-timeout", "2.0", DEVICE_0, str(SPEED)],
+            stdin=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, text=True)
+    (_, stderr) = client.communicate()
+    rc = client.wait()
+    assert "unable to connect to remote" in stderr
+    assert rc != 0
+
 # Test: client can't connect to the specified address:port
 # Test: loopback service shuts down while in progress
