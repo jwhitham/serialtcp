@@ -268,14 +268,17 @@ def do_server_await_client_connect(ser_to_net: SerialToNet, name: str,
 
     if code == ST_CONNECTION_FAILED:
         sys.stderr.write('{}: ERROR: Connection failed on the client side\n'.format(name))
+        client_socket.shutdown(socket.SHUT_RDWR)
         client_socket.close()
         return False
     if code == ST_DISCONNECT:
         sys.stderr.write('{}: ERROR: Connection aborted by the client side\n'.format(name))
+        client_socket.shutdown(socket.SHUT_RDWR)
         client_socket.close()
         return False
     if code != ST_CONNECTED:
         sys.stderr.write('{}: ERROR: Connection timeout on the client side\n'.format(name))
+        client_socket.shutdown(socket.SHUT_RDWR)
         client_socket.close()
         return False
 
@@ -429,6 +432,7 @@ def do_main_loop(ser: serial.Serial, ser_to_net: SerialToNet, name: str,
         ser_to_net.disconnect()
 
         sys.stderr.write('{}: disconnected\n'.format(name))
+        client_socket.shutdown(socket.SHUT_RDWR)
         client_socket.close()
         ser.write(ST_ESCAPE + ST_DISCONNECT)
 

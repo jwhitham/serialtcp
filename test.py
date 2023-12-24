@@ -1,5 +1,3 @@
-#!/bin/bash
-
 
 import pytest
 import socket, threading, socketserver, tempfile
@@ -14,16 +12,29 @@ SPEED = 115200 * 8
 TEST_TIMEOUT = 10.0
 
 @pytest.fixture
-def loopback_port() -> typing.Iterator[int]:
+def loopback_server() -> typing.Iterator[typing.Tuple[int, typing.Callable[[], None]]]:
     running = [True]
 
     class ThreadedTCPLoopback(socketserver.BaseRequestHandler):
         def handle(self) -> None:
             while running[0]:
-                self.request.sendall(self.request.recv(1024))
+                self.request.settimeout(0.1)
+                try:
+                    data = self.request.recv(1024)
+                except TimeoutError:
+                    continue # No data received yet
+                if data == b"":
+                    return # Disconnected
+                self.request.settimeout(None)
+                self.request.sendall(data)
 
     class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         pass
+
+    def stop() -> None:
+        if running[0]:
+            running[0] = False
+            server.shutdown()
 
     server = ThreadedTCPServer((LOCAL_ADDRESS, 0), ThreadedTCPLoopback)
     with server:
@@ -31,9 +42,13 @@ def loopback_port() -> typing.Iterator[int]:
         server_thread = threading.Thread(target=server.serve_forever)
         server_thread.daemon = True
         server_thread.start()
-        yield port
-        running[0] = False
-        server.shutdown()
+        yield (port, stop)
+        stop()
+
+@pytest.fixture
+def loopback_port(loopback_server) -> typing.Iterator[int]:
+    (port, _) = loopback_server
+    yield port
 
 def connect_to_server(port: int) -> socket.socket:
     end_time = time.monotonic() + TEST_TIMEOUT
@@ -140,10 +155,13 @@ def test_mid_loopback(server_socket, loopback_client) -> None:
     for i in range(10):
         receive_and_transmit(server_socket, (i + 1) * 250)
 
-def test_big_loopback(server_socket, loopback_client) -> None:
-    """Send a series of larger messages"""
-    for i in range(10):
-        receive_and_transmit(server_socket, 16000 + (i * 4000))
+def test_big_loopback1(server_socket, loopback_client) -> None:
+    """Send larger message 1"""
+    receive_and_transmit(server_socket, 66666)
+
+def test_big_loopback2(server_socket, loopback_client) -> None:
+    """Send larger message 2"""
+    receive_and_transmit(server_socket, 33333)
 
 def test_server_reconnect(server_socket, loopback_client) -> None:
     """Disconnect from the server during the test, then reconnect.
@@ -262,4 +280,24 @@ def test_server_client_different_speed(server_socket) -> None:
     assert rc != 0
 
 # Test: client can't connect to the specified address:port
+def test_client_cant_connect(server_socket) -> None:
+    """Client's target address is not valid - can't connect. Error
+    should be reported when connecting to the server."""
+    try:
+        client = start_client(1, [])
+        server_socket.send(b"55555")
+        received = server_socket.recv(1)
+        assert received == b""  # Connection failed on the client side
+    finally:
+        client.kill()
+
 # Test: loopback service shuts down while in progress
+def test_kill_loopback(server_socket, loopback_server, loopback_client) -> None:
+    """Client's target is killed - check for correct behaviour."""
+    (_, stop) = loopback_server
+    receive_and_transmit(server_socket, 5)
+    stop()
+    time.sleep(0.5)
+    server_socket.send(b"66666")
+    received = server_socket.recv(1)
+    assert received == b""  # No more connection until we reconnect to the server
