@@ -192,15 +192,16 @@ def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
                 return False
 
             # Check for sync codes that are out of sequence
-            # The correct sync code (i) is acceptable
-            # The previous sync code (i - 1) is also acceptable
-            # Other sync codes are not
-            try:
-                j = to_receive.index(code)
-                if (j != i) and (j != (i - 1)):
-                    return False
-            except ValueError:
-                pass
+            # The correct sync code (i) is accepted
+            # The previous sync code (i - 1) is ignored
+            # Other sync codes are not accepted and restart the process
+            if code is not None:
+                try:
+                    j = to_receive.index(code)
+                    if (j != i) and (j != (i - 1)):
+                        return False
+                except ValueError:
+                    pass
 
             if (code is None) and (time.monotonic() >= timeout_at):
                 # Nothing received - no response from the other side
