@@ -8,8 +8,9 @@ LOCAL_ADDRESS = "localhost"
 PROGRAM = [sys.executable, str(Path(__file__).parent / "serialtcp.py")]
 DEVICE_0 = "/dev/ttyUSB0"
 DEVICE_1 = "/dev/ttyUSB1"
-SPEED = 115200 * 8
+SPEED = 115200
 TEST_TIMEOUT = 10.0
+DEBUG = False
 
 @pytest.fixture
 def loopback_server() -> typing.Iterator[typing.Tuple[int, typing.Callable[[], None]]]:
@@ -97,22 +98,26 @@ def start_client(port: int, args: typing.List[str]) -> subprocess.Popen:
 
 @pytest.fixture
 def server_socket() -> typing.Iterator[socket.socket]:
-    (server, port) = start_server([])
+    (server, port) = start_server(["--debug"] if DEBUG else [])
     s = connect_to_server(port)
     yield s
     server.kill()
 
 @pytest.fixture
 def loopback_client(loopback_port: int) -> typing.Iterator[int]:
-    client = start_client(loopback_port, [])
+    client = start_client(loopback_port, ["--debug"] if DEBUG else [])
     yield 0
     client.kill()
 
 def receive_and_transmit(server_socket, size) -> None:
     r = random.Random(size)
     data: typing.List[bytes] = []
-    while (len(data) * 8) < size:
-        data.append(struct.pack("Q", r.randrange(0, 1 << 64)))
+    if DEBUG:
+        while len(data) < size:
+            data.append(struct.pack("<B", size & 0xff))
+    else:
+        while (len(data) * 8) < size:
+            data.append(struct.pack("Q", r.randrange(0, 1 << 64)))
 
     to_send = b"".join(data)[:size]
     bytes_sent = 0

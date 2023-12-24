@@ -28,11 +28,9 @@ ST_CONNECT = b"C"
 ST_CONNECTION_FAILED = b"F"
 ST_DISCONNECT = b"D"
 ST_START = b"s"
-ST_SERVER_HELLO_0 = b"\xe0"
-ST_SERVER_HELLO_1 = b"\xe1"
-ST_SERVER_HELLO_2 = b"\xe2"
-ST_CLIENT_HELLO_1 = b"\xc1"
-ST_CLIENT_HELLO_2 = b"\xc2"
+ST_SERVER_HELLO = b"\xe0"
+ST_SERVER_SYNC_CODES = [b"\xe1", b"\xe2", b"\xe3"]
+ST_CLIENT_SYNC_CODES = [b"\xc1", b"\xc2", b"\xc3"]
 
 RETRY_TIMEOUT = 1.0
 
@@ -146,8 +144,8 @@ def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
     ensuring that both are present and in the same state."""
 
     # The message sequence for synchronisation
-    to_send = [ST_SERVER_HELLO_1, ST_SERVER_HELLO_2]
-    to_receive = [ST_CLIENT_HELLO_1, ST_CLIENT_HELLO_2]
+    to_send = ST_SERVER_SYNC_CODES
+    to_receive = ST_CLIENT_SYNC_CODES
     if is_client:
         (to_send, to_receive) = (to_receive, to_send)
 
@@ -168,7 +166,7 @@ def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
     # A server sends an initial optional message to tell a client it is ready;
     # this helps faster synchronisation if the client is already running.
     if not is_client:
-        ser.write(ST_ESCAPE + ST_SERVER_HELLO_0)
+        ser.write(ST_ESCAPE + ST_SERVER_HELLO)
 
     # Send each message
     for i in range(len(to_send)):
@@ -189,13 +187,20 @@ def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
                     'One side should use --client, the other should use --server.\n')
                 return False
 
-            if (code == ST_SERVER_HELLO_0) and is_client:
+            if (code == ST_SERVER_HELLO) and is_client:
                 # Server just became ready. Immediate restart of sync.
                 return False
 
-            if (code in to_receive) and (code != to_receive[i]):
-                # Restart sync if the wrong message was received
-                return False
+            # Check for sync codes that are out of sequence
+            # The correct sync code (i) is acceptable
+            # The previous sync code (i - 1) is also acceptable
+            # Other sync codes are not
+            try:
+                j = to_receive.index(code)
+                if (j != i) and (j != (i - 1)):
+                    return False
+            except ValueError:
+                pass
 
             if (code is None) and (time.monotonic() >= timeout_at):
                 # Nothing received - no response from the other side
