@@ -20,6 +20,7 @@ import argparse
 import typing
 import collections
 import math
+import logging
 
 ControlCommand = bytes
 ST_ESCAPE = b"\x1f"
@@ -33,6 +34,8 @@ ST_SERVER_SYNC_CODES = [b"\xe1", b"\xe2", b"\xe3"]
 ST_CLIENT_SYNC_CODES = [b"\xc1", b"\xc2", b"\xc3"]
 
 RETRY_TIMEOUT = 1.0
+
+log = logging.Logger("serialtcp")
 
 class SerialToNet:
     """Received serial data is separated into control messages and TCP data."""
@@ -85,7 +88,7 @@ class SerialToNet:
     def data_received(self, data: bytes) -> None:
         # Filter for commands and escape codes
         if self.__debug:
-            sys.stderr.write('{}: receive serial: {}\n'.format(self.__name, repr(data)))
+            logging.debug('%s: receive serial: %s', self.__name, repr(data))
         i = 0
         while i < len(data):
             code = data[i:i+1]
@@ -120,7 +123,7 @@ class SerialToNet:
         try:
             if self.__socket is not None:
                 if self.__debug:
-                    sys.stderr.write('{}: forward data: {}\n'.format(self.__name, repr(data)))
+                    logging.debug('%s: forward data: %s', self.__name, repr(data))
                 self.__socket.sendall(data)
         except Exception:
             # In the event of an unexpected disconnection, try to stop
@@ -150,7 +153,7 @@ def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
         (to_send, to_receive) = (to_receive, to_send)
 
     if debug:
-        sys.stderr.write('{}: attempt to synchronise\n'.format(name))
+        logging.debug('%s: attempt to synchronise', name)
 
     # Clear out received messages
     while ser_to_net.get_control_message() is not None:
@@ -173,7 +176,7 @@ def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
         # Client takes the initiative and sends a message first
         if is_client:
             if debug:
-                sys.stderr.write('{}: send sync: {}\n'.format(name, repr(to_send[i])))
+                logging.debug('%s: send sync: %s', name, repr(to_send[i]))
             ser.write(ST_ESCAPE + to_send[i])
 
         timeout_at = time.monotonic() + timeout
@@ -183,7 +186,7 @@ def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
 
             if code in to_send:
                 # Getting back what we are sending? Bad sign!
-                sys.stderr.write('WARNING: Misconfiguration or echo detected. '
+                logging.info('WARNING: Misconfiguration or echo detected. '
                     'One side should use --client, the other should use --server.\n')
                 return False
 
@@ -211,7 +214,7 @@ def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
         # Server responds to the client's message now
         if not is_client:
             if debug:
-                sys.stderr.write('{}: send sync: {}\n'.format(name, repr(to_send[i])))
+                logging.debug('%s: send sync: %s', name, repr(to_send[i]))
             ser.write(ST_ESCAPE + to_send[i])
 
 
@@ -231,9 +234,9 @@ def do_server_accept_connection(ser_to_net: SerialToNet, name: str,
             (client_socket, addr) = server_socket.accept()
             client_host = addr[0]
             client_port = addr[1]
-            sys.stderr.write('{}: connection from {}:{}\n'.format(name, client_host, client_port))
+            logging.info('%s: connection from %s:%s', name, client_host, client_port)
             return client_socket
-        except TimeoutError:
+        except (TimeoutError, socket.timeout):
             # Check for disconnection command from the other side
             code = ser_to_net.get_control_message()
             while (code is not None) and (code != ST_DISCONNECT):
@@ -273,17 +276,17 @@ def do_server_await_client_connect(ser_to_net: SerialToNet, name: str,
         code = ser_to_net.get_control_message(max(0.0, timeout_at - time.monotonic()))
 
     if code == ST_CONNECTION_FAILED:
-        sys.stderr.write('{}: ERROR: Connection failed on the client side\n'.format(name))
+        logging.error('%s: Connection failed on the client side', name)
         client_socket.shutdown(socket.SHUT_RDWR)
         client_socket.close()
         return False
     if code == ST_DISCONNECT:
-        sys.stderr.write('{}: ERROR: Connection aborted by the client side\n'.format(name))
+        logging.error('%s: Connection aborted by the client side', name)
         client_socket.shutdown(socket.SHUT_RDWR)
         client_socket.close()
         return False
     if code != ST_CONNECTED:
-        sys.stderr.write('{}: ERROR: Connection timeout on the client side\n'.format(name))
+        logging.error('%s: Connection timeout on the client side', name)
         client_socket.shutdown(socket.SHUT_RDWR)
         client_socket.close()
         return False
@@ -305,16 +308,16 @@ def do_client_await_serial_connect(ser_to_net: SerialToNet, name: str) -> bool:
 def do_client_connect(client_host: str, client_port: int,
             timeout: float, name: str, address_family: int) -> typing.Optional[socket.socket]:
     """Connect to a TCP port."""
-    sys.stderr.write("{}: connecting to {}:{}...\n".format(name, client_host, client_port))
+    logging.info("%s: connecting to %s:%s...", name, client_host, client_port)
     client_socket = socket.socket(address_family, socket.SOCK_STREAM)
     client_socket.settimeout(timeout)
     try:
         client_socket.connect((client_host, int(client_port)))
     except socket.error as msg:
-        sys.stderr.write('{}: ERROR: Connection failed: {}\n'.format(name, msg))
+        logging.error('%s: ERROR: Connection failed: %s', name, msg)
         return None
 
-    sys.stderr.write('{}: connected\n'.format(name))
+    logging.info('%s: connected', name)
     client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     return client_socket
 
@@ -326,18 +329,18 @@ def do_network_to_serial_loop(ser_to_net: SerialToNet, ser: serial.Serial,
 
     try:
         data = client_socket.recv(4096)
-    except TimeoutError:
+    except (TimeoutError, socket.timeout):
         if debug:
-            sys.stderr.write('{}: receive network timeout\n'.format(name))
+            logging.debug('%s: receive network timeout', name)
         return True
 
     if data == b"":
         if debug:
-            sys.stderr.write('{}: receive network end\n'.format(name))
+            logging.debug('%s: receive network end', name)
         return False # Disconnected
 
     if debug:
-        sys.stderr.write('{}: receive network: {}\n'.format(name, repr(data)))
+        logging.debug('%s: receive network: %s', name, repr(data))
 
     i = 0
     while i < len(data):
@@ -371,15 +374,14 @@ def do_main_loop(ser: serial.Serial, ser_to_net: SerialToNet, name: str,
                             min(timeout_at - time.monotonic(), attempt_timeout))):
         if time.monotonic() > timeout_at:
             # No more attempts
-            sys.stderr.write('{}: unable to connect to remote via {}\n'.format(
-                        name, serialport))
+            logging.error('%s: unable to connect to remote via %s', name, serialport)
             sys.exit(2)
         attempt_timeout = min(60.0, attempt_timeout * 1.5)
 
     # The connection is not yet set up. A connection to the server will begin it.
     if server_socket is not None:
-        sys.stderr.write('{}: serial link ok, waiting for connection on {}:{}...\n'.format(
-                name, server_bind_address, server_port))
+        logging.info('%s: serial link ok, waiting for connection on %s:%s...',
+                name, server_bind_address, server_port)
 
         client_socket = do_server_accept_connection(
                     ser_to_net=ser_to_net, server_socket=server_socket, name=name)
@@ -400,7 +402,7 @@ def do_main_loop(ser: serial.Serial, ser_to_net: SerialToNet, name: str,
             return
 
     else:
-        sys.stderr.write('{}: serial link ok, waiting for connection on {}...\n'.format(name, serialport))
+        logging.info('%s: serial link ok, waiting for connection on %s...', name, serialport)
 
         # Await connect message from the other side of the serial cable
         if not do_client_await_serial_connect(ser_to_net=ser_to_net, name=name):
@@ -431,13 +433,13 @@ def do_main_loop(ser: serial.Serial, ser_to_net: SerialToNet, name: str,
                     ser=ser, client_socket=client_socket, name=name):
             pass
     except socket.error as msg:
-        sys.stderr.write('{}: ERROR: {}\n'.format(name, msg))
+        logging.error('%s: %s', name, msg)
     except ConnectionResetError:
         pass
     finally:
         ser_to_net.disconnect()
 
-        sys.stderr.write('{}: disconnected\n'.format(name))
+        logging.info('%s: disconnected', name)
         client_socket.shutdown(socket.SHUT_RDWR)
         client_socket.close()
         ser.write(ST_ESCAPE + ST_DISCONNECT)
@@ -487,13 +489,13 @@ it waits for the next connect.
         default=10.0)
 
     parser.add_argument(
-        '--log',
-        help='Log file name prefix')
-
-    parser.add_argument(
         '-6', '--ipv6',
         action='store_true',
         help='Use IPv6')
+
+    parser.add_argument(
+        '--log',
+        help='Log file')
 
     # This parameter is just for testing, and creates a file containing the server port number
     parser.add_argument(
@@ -561,6 +563,9 @@ it waits for the next connect.
     args = parser.parse_args()
     assert args.client or args.server
     assert not (args.client and args.server)
+    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO, force=True,
+                         format='%(asctime)s %(message)s',
+                         filename=args.log)
 
     # connect to serial port
     ser = serial.serial_for_url(args.serialport, do_not_open=True, exclusive=True)
@@ -578,12 +583,12 @@ it waits for the next connect.
         ser.dtr = args.dtr
 
     name = "Client" if args.client else "Server"
-    sys.stderr.write(f'{name}: serialtcp.py serial settings: {ser.name} {ser.baudrate},{ser.bytesize},{ser.parity},{ser.stopbits}\n')
+    logging.info(f'{name}: serialtcp.py serial settings: {ser.name} {ser.baudrate},{ser.bytesize},{ser.parity},{ser.stopbits}\n')
 
     try:
         ser.open()
     except serial.SerialException as e:
-        sys.stderr.write('Could not open serial port {}: {}\n'.format(ser.name, e))
+        logging.error('Could not open serial port %s: %s\n', ser.name, e)
         sys.exit(1)
 
     ser_to_net = SerialToNet(name, args.debug)
@@ -605,15 +610,17 @@ it waits for the next connect.
         server_socket.bind((server_bind_address, int(server_port)))
         server_port = str(server_socket.getsockname()[1])
         server_socket.listen(0)
-        sys.stderr.write(f'{name}: serialtcp.py TCP service listening on {server_bind_address}:{server_port}\n')
+        logging.info('%s: serialtcp.py TCP service listening on %s:%s',
+                    name, server_bind_address, server_port)
         if args.test_port_file:
             with open(args.test_port_file, "wt") as fd:
                 fd.write(f"{server_port}\n")
     else:
         client_host, sep, client_port = args.client.rpartition(":")
-        sys.stderr.write(f'{name}: serialtcp.py TCP client will connect to {client_host}:{client_port}\n')
+        logging.info('%s: serialtcp.py TCP client will connect to %s:%s',
+                name, client_host, client_port)
 
-    sys.stderr.write('{}: waiting for serial link on {}...\n'.format(name, args.serialport))
+    logging.info('%s: waiting for serial link on %s...', name, args.serialport)
 
     try:
         while True:
@@ -627,7 +634,7 @@ it waits for the next connect.
     except KeyboardInterrupt:
         pass
 
-    sys.stderr.write('{}: exit\n'.format(name))
+    logging.info('%s: exit', name)
     serial_worker.stop()
 
 if __name__ == '__main__':
