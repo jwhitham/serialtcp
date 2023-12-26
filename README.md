@@ -29,17 +29,19 @@ And on the other side, acting as a TCP client which will connect to 192.168.0.1 
 
     python serialtcp.py --client 192.168.0.1:22 /dev/ttyUSB0 
 
-When both copies of the program are running, they will synchronise over the serial cable.
-Then, the first connection to port 1234 will be forwarded to 192.168.0.1:22.
+When both copies of the program are running, they will synchronise
+over the serial cable. A connection to port 1234
+will be forwarded across the serial cable to 192.168.0.1:22.
 
 Limitations
 ===========
 
 No security measures are implemented. Anyone can remotely connect
-to this service. By default the server port only binds to localhost interfaces.
+to this service, but by default,
+the server port only binds to localhost interfaces.
 
 Only one connection at once is supported. When the connection is terminated
-it waits for the next connect.
+it waits for the next connection.
 
 The protocol uses escape codes to represent events such as connection and
 disconnection, and therefore the connection works much like a TCP stream,
@@ -52,7 +54,9 @@ authentication or support for other protocols you should consider using PPP or S
 
 You cannot use this program to simply expose a serial port as a TCP service
 which can be used via `telnet` or `netcat`. If this is what you need, consider using
-https://github.com/pyserial/pyserial/blob/master/examples/tcp_serial_redirect.py instead.
+tcp_serial_redirect.py instead (see Acknowledgments below). The original
+tcp_serial_redirect.py is not suitable for forwarding most TCP connections (e.g. SSH, HTTP)
+because each network connection is established on startup, rather than when a client connects.
 
 Acknowledgments
 ===============

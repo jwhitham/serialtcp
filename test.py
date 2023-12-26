@@ -37,7 +37,7 @@ def loopback_server() -> typing.Iterator[typing.Tuple[int, typing.Callable[[], N
                     data = self.request.recv(1024)
                 except (TimeoutError, socket.timeout):
                     continue # No data received yet
-                except ConnectionResetError:
+                except (ConnectionAbortedError, ConnectionResetError):
                     data = b"" # Seen on Windows only
                 if data == b"":
                     return # Disconnected
@@ -249,7 +249,7 @@ def test_client_restart(loopback_port) -> None:
                     try:
                         server_socket.send(b"3")
                         server_socket.send(b"3")
-                    except ConnectionAbortedError:
+                    except (ConnectionAbortedError, ConnectionResetError):
                         raise BrokenPipeError from None # Different exception on Windows
 
                 # Reconnect to the server in order to carry on
@@ -314,7 +314,7 @@ def test_client_cant_connect(server_socket) -> None:
         server_socket.send(b"55555")
         try:
             received = server_socket.recv(1)
-        except ConnectionResetError:
+        except (ConnectionAbortedError, ConnectionResetError):
             # We get this error on Windows but on Linux the recv function just returns b"".
             # Either is ok.
             received = b""
@@ -330,7 +330,11 @@ def test_kill_loopback(server_socket, loopback_server, loopback_client) -> None:
     stop()
     time.sleep(0.5)
     server_socket.send(b"66666")
-    received = server_socket.recv(1)
+    try:
+        received = server_socket.recv(1)
+    except (ConnectionAbortedError, ConnectionResetError):
+        # Exception seen on Windows
+        received = b""
     assert received == b""  # No more connection until we reconnect to the server
 
 if __name__ == "__main__":
