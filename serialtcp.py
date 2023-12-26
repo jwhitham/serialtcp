@@ -35,8 +35,6 @@ ST_CLIENT_SYNC_CODES = [b"\xc1", b"\xc2", b"\xc3"]
 
 RETRY_TIMEOUT = 1.0
 
-log = logging.Logger("serialtcp")
-
 class SerialToNet:
     """Received serial data is separated into control messages and TCP data."""
 

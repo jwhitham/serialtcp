@@ -1,16 +1,29 @@
+#!/usr/bin/env python
+#
+# Test for serialtcp
+#
+# You need to set up two serial ports on the same PC, and connect them together with
+# a null modem cable. I'm using two USB serial adapters, both with TTL outputs.
+#
 
 import pytest
 import socket, threading, socketserver, tempfile
 import subprocess, time, random, struct, sys, typing
+import serial.tools.list_ports  # type: ignore
 from pathlib import Path
 
 LOCAL_ADDRESS = "localhost"
 PROGRAM = [sys.executable, str(Path(__file__).parent / "serialtcp.py")]
-DEVICE_0 = "/dev/ttyUSB0"
-DEVICE_1 = "/dev/ttyUSB1"
+DEVICES = [__d.device for __d in serial.tools.list_ports.comports()
+            if __d.name not in ("COM1", "ttyS0")]
+assert len(DEVICES) >= 2, "There must be at least two serial port devices attached (excluding COM1)"
+DEVICE_0 = DEVICES[0]
+DEVICE_1 = DEVICES[1]
 SPEED = 115200
 TEST_TIMEOUT = 10.0
 DEBUG = False
+
+
 
 @pytest.fixture
 def loopback_server() -> typing.Iterator[typing.Tuple[int, typing.Callable[[], None]]]:
@@ -22,8 +35,10 @@ def loopback_server() -> typing.Iterator[typing.Tuple[int, typing.Callable[[], N
                 self.request.settimeout(0.1)
                 try:
                     data = self.request.recv(1024)
-                except TimeoutError:
+                except (TimeoutError, socket.timeout):
                     continue # No data received yet
+                except ConnectionResetError:
+                    data = b"" # Seen on Windows only
                 if data == b"":
                     return # Disconnected
                 self.request.settimeout(None)
@@ -218,7 +233,10 @@ def test_client_restart(loopback_port) -> None:
             # that the client has gone. There is no response.
             server_socket.send(b"22222")
             with pytest.raises(TimeoutError):
-                server_socket.recv(1)
+                try:
+                    server_socket.recv(1)
+                except socket.timeout:
+                    raise TimeoutError from None # Different exception on Windows
 
             # Now we can restart the client; this will cause a resync. The server socket
             # will be disconnected (FIN and RST messages).
@@ -228,8 +246,11 @@ def test_client_restart(loopback_port) -> None:
                 # This ought to result in Connection Reset By Peer, but we don't see that
                 # until the second message is sent
                 with pytest.raises(BrokenPipeError):
-                    server_socket.send(b"3")
-                    server_socket.send(b"3")
+                    try:
+                        server_socket.send(b"3")
+                        server_socket.send(b"3")
+                    except ConnectionAbortedError:
+                        raise BrokenPipeError from None # Different exception on Windows
 
                 # Reconnect to the server in order to carry on
                 server_socket = connect_to_server(port)
@@ -291,7 +312,12 @@ def test_client_cant_connect(server_socket) -> None:
     try:
         client = start_client(1, [])
         server_socket.send(b"55555")
-        received = server_socket.recv(1)
+        try:
+            received = server_socket.recv(1)
+        except ConnectionResetError:
+            # We get this error on Windows but on Linux the recv function just returns b"".
+            # Either is ok.
+            received = b""
         assert received == b""  # Connection failed on the client side
     finally:
         client.kill()
@@ -306,3 +332,6 @@ def test_kill_loopback(server_socket, loopback_server, loopback_client) -> None:
     server_socket.send(b"66666")
     received = server_socket.recv(1)
     assert received == b""  # No more connection until we reconnect to the server
+
+if __name__ == "__main__":
+    pytest.main(sys.argv[1:] if len(sys.argv) > 1 else [__file__])
