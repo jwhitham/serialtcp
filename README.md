@@ -1,9 +1,5 @@
-===========
- serialtcp
-===========
-
-Overview
-========
+serialtcp
+=========
 
 This program redirects a TCP connection via a serial port.
 
@@ -54,15 +50,15 @@ authentication or support for other protocols you should consider using PPP or S
 
 You cannot use this program to simply expose a serial port as a TCP service
 which can be used via `telnet` or `netcat`. If this is what you need, consider using
-tcp_serial_redirect.py instead (see Acknowledgments below). The original
-tcp_serial_redirect.py is not suitable for forwarding most TCP connections (e.g. SSH, HTTP)
+tcp\_serial\_redirect.py instead (see Acknowledgments below). The original
+tcp\_serial\_redirect.py is not suitable for forwarding most TCP connections (e.g. SSH, HTTP)
 because each network connection is established on startup, rather than when a client connects.
 
 Acknowledgments
 ===============
 
 This program is based on an example from `pyserial`
-copied from https://github.com/pyserial/pyserial/blob/master/examples/tcp_serial_redirect.py
+forked from [the pyserial repo](https://github.com/pyserial/pyserial/blob/master/examples/tcp_serial_redirect.py)
 and written by Chris Liechti. Thanks, Chris, for your work on `pyserial`!
 
 See https://github.com/pyserial/pyserial
