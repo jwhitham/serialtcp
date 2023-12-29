@@ -1,0 +1,15 @@
+[Unit]
+Description=Run Serial TCP service
+After=rc-local.service
+
+[Service]
+Type=simple
+PIDFile=/run/serialtcp.pid
+ExecStart=/usr/bin/python /opt/serialtcp/serialtcp.py -c localhost:22 /dev/serialtcp 921600
+User=uucp
+Group=dialout
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

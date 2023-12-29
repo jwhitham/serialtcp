@@ -20,6 +20,7 @@ import argparse
 import typing
 import collections
 import math
+import enum
 import logging
 
 ControlCommand = bytes
@@ -139,8 +140,14 @@ class SerialToNet:
             self.__parent.data_received(data)
 
 
+class SynchroniseResult(enum.Enum):
+    RETRY = enum.auto()
+    OK = enum.auto()
+    ECHO = enum.auto()
+
 def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
-                    name: str, debug: bool, is_client: bool, timeout: float) -> bool:
+                    name: str, debug: bool, is_client: bool, timeout: float,
+                    ignore_echo: bool) -> SynchroniseResult:
     """The client and server will use this to synchronise over the serial line,
     ensuring that both are present and in the same state."""
 
@@ -184,13 +191,14 @@ def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
 
             if code in to_send:
                 # Getting back what we are sending? Bad sign!
-                logging.info('WARNING: Misconfiguration or echo detected. '
-                    'One side should use --client, the other should use --server.\n')
-                return False
+                if not ignore_echo:
+                    logging.info('WARNING: Misconfiguration or echo detected. '
+                        'One side should use --client, the other should use --server.\n')
+                return SynchroniseResult.ECHO
 
             if (code == ST_SERVER_HELLO) and is_client:
                 # Server just became ready. Immediate restart of sync.
-                return False
+                return SynchroniseResult.RETRY
 
             # Check for sync codes that are out of sequence
             # The correct sync code (i) is accepted
@@ -200,14 +208,14 @@ def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
                 try:
                     j = to_receive.index(code)
                     if (j != i) and (j != (i - 1)):
-                        return False
+                        return SynchroniseResult.RETRY
                 except ValueError:
                     pass
 
             if (code is None) and (time.monotonic() >= timeout_at):
                 # Nothing received - no response from the other side
                 # Give up this synchronisation attempt
-                return False
+                return SynchroniseResult.RETRY
 
         # Server responds to the client's message now
         if not is_client:
@@ -215,8 +223,7 @@ def do_synchronise(ser: serial.Serial, ser_to_net: SerialToNet,
                 logging.debug('%s: send sync: %s', name, repr(to_send[i]))
             ser.write(ST_ESCAPE + to_send[i])
 
-
-    return True
+    return SynchroniseResult.OK
 
 def do_server_accept_connection(ser_to_net: SerialToNet, name: str,
                         server_socket: socket.socket) -> typing.Optional[socket.socket]:
@@ -366,11 +373,17 @@ def do_main_loop(ser: serial.Serial, ser_to_net: SerialToNet, name: str,
     # The two sides of the serial connection should synchronise
     attempt_timeout = 1.0
     timeout_at = time.monotonic() + sync_timeout
-    while not do_synchronise(ser=ser, ser_to_net=ser_to_net, name=name,
+    result = SynchroniseResult.RETRY
+    ignore_echo = False
+    while result != SynchroniseResult.OK:
+        result = do_synchronise(ser=ser, ser_to_net=ser_to_net, name=name,
                         debug=debug, is_client=server_socket is None,
+                        ignore_echo=ignore_echo,
                         timeout=max(0.0,
-                            min(timeout_at - time.monotonic(), attempt_timeout))):
-        if time.monotonic() > timeout_at:
+                            min(timeout_at - time.monotonic(), attempt_timeout)))
+        if result == SynchroniseResult.ECHO:
+            ignore_echo = True
+        if (result != SynchroniseResult.OK) and (time.monotonic() > timeout_at):
             # No more attempts
             logging.error('%s: unable to connect to remote via %s', name, serialport)
             sys.exit(2)
