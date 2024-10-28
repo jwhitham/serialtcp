@@ -24,15 +24,15 @@ import enum
 import logging
 
 ControlCommand = bytes
-ST_ESCAPE = b"\x1f"
-ST_CONNECTED = b"c"
-ST_CONNECT = b"C"
-ST_CONNECTION_FAILED = b"F"
-ST_DISCONNECT = b"D"
-ST_START = b"s"
-ST_SERVER_HELLO = b"\xe0"
-ST_SERVER_SYNC_CODES = [b"\xe1", b"\xe2", b"\xe3"]
-ST_CLIENT_SYNC_CODES = [b"\xc1", b"\xc2", b"\xc3"]
+ST_CONNECTED = b"\xd1"
+ST_CONNECT = b"\xd2"
+ST_CONNECTION_FAILED = b"\xd3"
+ST_DISCONNECT = b"\xd4"
+ST_START = b"\xd5"
+ST_RESEND = b"\xd6"
+ST_SERVER_HELLO = b"\xe4"
+ST_SERVER_SYNC_CODES = [b"\xe5", b"\xe6", b"\xe7"]
+ST_CLIENT_SYNC_CODES = [b"\xc5", b"\xc6", b"\xc7"]
 
 RETRY_TIMEOUT = 1.0
 
@@ -43,7 +43,7 @@ class SerialToNet:
         self.__name = name
         self.__debug = debug
         self.__socket: typing.Optional[socket.socket] = None
-        self.__escape = False
+        self.__byte_count = -HEADER_SIZE 
         self.__started = False
         self.__control_message_queue: typing.Deque[ControlCommand] = collections.deque()
         self.__message_lock = threading.Condition()
@@ -79,54 +79,62 @@ class SerialToNet:
 
     def disconnect(self) -> None:
         self.__push_command(ST_DISCONNECT)
+        self.__state = ReceiveState.NOT_STARTED
 
     def set_socket(self, s: socket.socket) -> None:
         self.__socket = s
-        self.__started = False
+        self.__state = ReceiveState.NOT_STARTED
 
     def data_received(self, data: bytes) -> None:
         # Filter for commands and escape codes
         if self.__debug:
             logging.debug('%s: receive serial: %s', self.__name, repr(data))
-        i = 0
-        while i < len(data):
-            code = data[i:i+1]
-            if self.__escape:
-                if code != ST_ESCAPE:
-                    # A command of some kind - removed from the input
+
+        for code in data:
+            if self.__state == ReceiveState.NOT_STARTED:
+                pass
+            elif self.__state == ReceiveState.EXPECT_HEADER:
+                if code < 0x80:
+                    # Begin a new header - this byte gives the payload size
+                    self.__state = ReceiveState.EXPECT_CRC
+                    self.__payload_size = code + 1
+                    self.__packet_number += 1
+                    if self.__debug:
+                        logging.debug('%s: header, payload size %d', self.__name, self.__payload_size))
+                else:
+                    # A command of some kind is received
+                    if self.__debug:
+                        logging.debug('%s: command: 0x%x', self.__name, code))
                     self.__push_command(code)
 
-                    # Remove from input
-                    data = data[:i] + data[i+1:]
-                elif not self.__started:
-                    # Junk before start - removed
-                    data = data[:i] + data[i+1:]
-                else:
-                    # Literal ST_ESCAPE character - kept in the input
-                    i += 1
-
-                self.__escape = False
-            else:
-                if code == ST_ESCAPE:
-                    # Escape code - removed from the input
-                    self.__escape = True
-                    data = data[:i] + data[i+1:]
-                elif not self.__started:
-                    # Junk before start - removed
-                    data = data[:i] + data[i+1:]
-                else:
-                    # Literal character
-                    i += 1
-
-        # Forward remaining data to the socket
-        try:
-            if self.__socket is not None:
+            elif self.__state == ReceiveState.EXPECT_CRC:
+                self.__crc = code
+                self.__state = ReceiveState.EXPECT_PAYLOAD
+                self.__payload_received.clear()
                 if self.__debug:
-                    logging.debug('%s: forward data: %s', self.__name, repr(data))
-                self.__socket.sendall(data)
-        except Exception:
-            # In the event of an unexpected disconnection, try to stop
-            self.disconnect()
+                    logging.debug('%s: header, CRC %d', self.__name, self.__crc))
+
+            elif self.__state == ReceiveState.EXPECT_PAYLOAD:
+                self.__payload_received.append(bytes((code, )))
+                if len(self.__payload_received) >= self.__payload_size:
+                    payload = b"".join(self.__payload_received)
+                    self.__state = ReceiveState.EXPECT_HEADER
+                    if self.__crc == (zlib.crc32(payload) & 0xff):
+                        # CRC valid, payload is accepted
+                        if self.__debug:
+                            logging.debug('%s: CRC valid: forward: %s', self.__name, repr(payload))
+                        try:
+                            if self.__socket is not None:
+                                self.__socket.sendall(payload)
+                        except Exception:
+                            # In the event of an unexpected disconnection, try to stop
+                            self.disconnect()
+                    else:
+                        # CRC error, ask for the payload again
+                        if self.__debug:
+                            logging.debug('%s: CRC not valid', self.__name)
+                        self.__push_command(ST_RESEND)
+                        self.__push_command(self.__packet_number)
 
     class __SerialToNetProtocol(serial.threaded.Protocol):
         """Wrapper for serial.threaded.Protocol created to allow full type-checking on SerialToNet."""
